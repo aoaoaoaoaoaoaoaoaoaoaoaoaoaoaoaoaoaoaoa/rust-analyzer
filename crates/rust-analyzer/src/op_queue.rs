@@ -59,6 +59,11 @@ impl<Args: std::fmt::Debug, Output> OpQueue<Args, Output> {
         self.last_op_result = Some(result);
     }
 
+    pub(crate) fn discard_completed(&mut self) {
+        assert!(self.op_in_progress);
+        self.op_in_progress = false;
+    }
+
     /// Get the result of the last operation.
     pub(crate) fn last_op_result(&self) -> Option<&Output> {
         self.last_op_result.as_ref()

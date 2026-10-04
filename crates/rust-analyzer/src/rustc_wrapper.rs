@@ -10,7 +10,11 @@ use std::{
     process::{Command, ExitCode, Stdio},
 };
 
-pub(crate) fn main() -> io::Result<ExitCode> {
+/// Runs the Cargo rustc-wrapper invocation from process arguments.
+///
+/// The caller selects this mode when `RA_RUSTC_WRAPPER` is set, before parsing
+/// ordinary server arguments. Arguments begin with the executable to wrap.
+pub fn run() -> io::Result<ExitCode> {
     let mut args = std::env::args_os();
     let _me = args.next().unwrap();
     let rustc = args.next().unwrap();

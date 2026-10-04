@@ -48,24 +48,55 @@ use tracing::{debug, info};
 pub(crate) enum ProjectWorkspaceProgress {
     Begin,
     Report(String),
-    End(Vec<anyhow::Result<ProjectWorkspace>>, bool),
+    End(
+        Vec<anyhow::Result<ProjectWorkspace>>,
+        bool,
+        Box<crate::configuration_custody::ConfigurationLoad>,
+    ),
 }
 
 #[derive(Debug)]
 pub(crate) enum BuildDataProgress {
     Begin,
     Report(String),
-    End((Arc<Vec<ProjectWorkspace>>, Vec<anyhow::Result<WorkspaceBuildScripts>>)),
+    End(
+        (
+            Arc<Vec<ProjectWorkspace>>,
+            Vec<anyhow::Result<WorkspaceBuildScripts>>,
+            Box<crate::configuration_custody::ConfigurationLoad>,
+        ),
+    ),
 }
 
 #[derive(Debug)]
 pub(crate) enum ProcMacroProgress {
     Begin,
     Report(String),
-    End(ChangeWithProcMacros),
+    End(
+        ChangeWithProcMacros,
+        Arc<Vec<ProjectWorkspace>>,
+        Box<crate::configuration_custody::ConfigurationLoad>,
+    ),
 }
 
 impl GlobalState {
+    pub(crate) fn request_configuration_refresh(&mut self, cause: &str) {
+        if !self.fetch_workspaces_queue.op_requested()
+            && !self.fetch_workspaces_queue.op_in_progress()
+            && self.fetch_ws_receiver.is_none()
+            && !self.fetch_build_data_queue.op_requested()
+            && !self.fetch_build_data_queue.op_in_progress()
+            && !self.fetch_proc_macros_queue.op_requested()
+            && !self.fetch_proc_macros_queue.op_in_progress()
+        {
+            self.configuration_custody.invalidate();
+            self.fetch_workspaces_queue.request_op(
+                cause.to_owned(),
+                FetchWorkspaceRequest { path: None, force_crate_graph_reload: true },
+            );
+        }
+    }
+
     /// Is the server quiescent?
     ///
     /// This indicates that we've fully loaded the projects and
@@ -92,6 +123,15 @@ impl GlobalState {
     pub(crate) fn update_configuration(&mut self, config: Config) {
         let _p = tracing::info_span!("GlobalState::update_configuration").entered();
         let old_config = mem::replace(&mut self.config, Arc::new(config));
+        if self.config.cargo(None) != old_config.cargo(None)
+            || self.config.linked_or_discovered_projects()
+                != old_config.linked_or_discovered_projects()
+            || self.config.expand_proc_macros() != old_config.expand_proc_macros()
+            || self.config.ignored_proc_macros(None) != old_config.ignored_proc_macros(None)
+            || self.config.expand_proc_attr_macros() != old_config.expand_proc_attr_macros()
+        {
+            self.configuration_custody.invalidate();
+        }
         if self.config.lru_parse_query_capacity() != old_config.lru_parse_query_capacity() {
             self.analysis_host.update_lru_capacity(self.config.lru_parse_query_capacity());
         }
@@ -282,6 +322,9 @@ impl GlobalState {
         force_crate_graph_reload: bool,
     ) {
         info!(%cause, "will fetch workspaces");
+        let configuration = self
+            .configuration_custody
+            .workspace_plan(&self.config, cause == "configuration witness discovery");
 
         self.task_pool.handle.spawn_with_sender(ThreadIntent::Worker, {
             let linked_projects = self.config.linked_or_discovered_projects();
@@ -300,6 +343,7 @@ impl GlobalState {
                 || !self.vfs_done);
 
             move |sender| {
+                let configuration = configuration.begin();
                 let progress = {
                     let sender = sender.clone();
                     move |msg| {
@@ -372,10 +416,17 @@ impl GlobalState {
                 }
 
                 info!(?workspaces, "did fetch workspaces");
+                let configuration = configuration.finish(
+                    &workspaces
+                        .iter()
+                        .filter_map(|workspace| workspace.as_ref().ok().cloned())
+                        .collect::<Vec<_>>(),
+                );
                 sender
                     .send(Task::FetchWorkspace(ProjectWorkspaceProgress::End(
                         workspaces,
                         force_crate_graph_reload,
+                        configuration,
                     )))
                     .unwrap();
             }
@@ -387,8 +438,10 @@ impl GlobalState {
         let workspaces = Arc::clone(&self.workspaces);
         let config = self.config.cargo(None);
         let root_path = self.config.default_root_path().clone();
+        let configuration = self.configuration_custody.dependent_plan(&self.config);
 
         self.task_pool.handle.spawn_with_sender(ThreadIntent::Worker, move |sender| {
+            let configuration = configuration.begin();
             sender.send(Task::FetchBuildData(BuildDataProgress::Begin)).unwrap();
 
             let progress = {
@@ -404,7 +457,14 @@ impl GlobalState {
                 &root_path,
             );
 
-            sender.send(Task::FetchBuildData(BuildDataProgress::End((workspaces, res)))).unwrap();
+            let configuration = configuration.finish(&workspaces);
+            sender
+                .send(Task::FetchBuildData(BuildDataProgress::End((
+                    workspaces,
+                    res,
+                    configuration,
+                ))))
+                .unwrap();
         });
     }
 
@@ -413,12 +473,21 @@ impl GlobalState {
         cause: Cause,
         mut change: ChangeWithProcMacros,
         paths: Vec<ProcMacroPaths>,
+        origin: crate::configuration_custody::ConfigurationOrigin,
     ) {
+        if !self.configuration_custody.matches_origin(&origin, &self.config, &self.workspaces) {
+            self.fetch_proc_macros_queue.op_completed(false);
+            self.request_configuration_refresh("stale queued proc macro generation");
+            return;
+        }
         info!(%cause, "will load proc macros");
         let ignored_proc_macros = self.config.ignored_proc_macros(None).clone();
         let proc_macro_clients = self.proc_macro_clients.clone();
+        let configuration = self.configuration_custody.dependent_plan(&self.config);
+        let workspaces = self.workspaces.clone();
 
         self.task_pool.handle.spawn_with_sender(ThreadIntent::Worker, move |sender| {
+            let configuration = configuration.begin();
             sender.send(Task::LoadProcMacros(ProcMacroProgress::Begin)).unwrap();
 
             let ignored_proc_macros = &ignored_proc_macros;
@@ -460,7 +529,14 @@ impl GlobalState {
             }
 
             change.set_proc_macros(builder);
-            sender.send(Task::LoadProcMacros(ProcMacroProgress::End(change))).unwrap();
+            let configuration = configuration.finish(&workspaces);
+            sender
+                .send(Task::LoadProcMacros(ProcMacroProgress::End(
+                    change,
+                    workspaces,
+                    configuration,
+                )))
+                .unwrap();
         });
     }
 
@@ -468,7 +544,7 @@ impl GlobalState {
         let _p = tracing::info_span!("GlobalState::switch_workspaces").entered();
         tracing::info!(%cause, "will switch workspaces");
 
-        let FetchWorkspaceResponse { workspaces, force_crate_graph_reload } =
+        let FetchWorkspaceResponse { workspaces, force_crate_graph_reload, configuration } =
             self.fetch_workspaces_queue.last_op_result()?;
         let switching_from_empty_workspace = self.workspaces.is_empty();
 
@@ -481,6 +557,7 @@ impl GlobalState {
             // if we don't have any workspace at all yet.
             return None;
         }
+        self.configuration_custody.install_model(configuration);
 
         let workspaces =
             workspaces.iter().filter_map(|res| res.as_ref().ok().cloned()).collect::<Vec<_>>();
@@ -489,17 +566,21 @@ impl GlobalState {
             && workspaces
                 .iter()
                 .zip(self.workspaces.iter())
-                .all(|(l, r)| l.eq_ignore_build_data(r));
+                .all(|(l, r)| l.eq_ignore_build_data(r))
+            && self.fetch_build_data_queue.last_op_result().is_none_or(|build| {
+                self.configuration_custody.is_current(&build.configuration, &self.config)
+            });
 
         if same_workspaces {
             if switching_from_empty_workspace {
                 // Switching from empty to empty is a no-op
                 return None;
             }
-            if let Some(FetchBuildDataResponse { workspaces, build_scripts }) =
+            if let Some(FetchBuildDataResponse { workspaces, build_scripts, configuration }) =
                 self.fetch_build_data_queue.last_op_result()
             {
                 if Arc::ptr_eq(workspaces, &self.workspaces) {
+                    self.configuration_custody.install_model(configuration);
                     info!("set build scripts to workspaces");
 
                     let workspaces = workspaces
@@ -808,10 +889,12 @@ impl GlobalState {
 
             change.set_crate_graph(crate_graph);
             cancellation_time = Some(self.analysis_host.apply_change(change));
+            self.configuration_custody.publish(self.configuration_custody.model.clone());
             _ = self.finish_loading_crate_graph();
         } else {
             change.set_crate_graph(crate_graph);
-            self.fetch_proc_macros_queue.request_op(cause, (change, proc_macro_paths));
+            let origin = self.configuration_custody.origin(&self.config, &self.workspaces);
+            self.fetch_proc_macros_queue.request_op(cause, (change, proc_macro_paths, origin));
         }
 
         self.report_progress(

@@ -127,6 +127,25 @@ impl RequestDispatcher<'_> {
         )
     }
 
+    /// Dispatches without fabricating a successful default while the VFS is loading.
+    /// The handler must reject incomplete analysis inputs itself.
+    pub(crate) fn on_guarded<const ALLOW_RETRYING: bool, R>(
+        &mut self,
+        f: fn(GlobalStateSnapshot, R::Params) -> anyhow::Result<R::Result>,
+    ) -> &mut Self
+    where
+        R: lsp_types::Request<
+                Params: DeserializeOwned + panic::UnwindSafe + Send + fmt::Debug,
+                Result: Serialize,
+            > + 'static,
+    {
+        self.on_with_thread_intent::<false, ALLOW_RETRYING, R>(
+            ThreadIntent::Worker,
+            f,
+            Self::content_modified_error,
+        )
+    }
+
     /// Dispatches a non-latency-sensitive request onto the thread pool. When the VFS is marked not
     /// ready this will return a `default` constructed `R::Result`.
     pub(crate) fn on_with_vfs_default<R>(

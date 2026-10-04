@@ -22,6 +22,7 @@ mod annotations;
 mod call_hierarchy;
 mod child_modules;
 mod doc_links;
+mod ensure_import;
 mod expand_macro;
 mod extend_selection;
 mod fetch_crates;
@@ -68,9 +69,9 @@ use hir::{ChangeWithProcMacros, EditionedFileId, crate_def_map, sym};
 use ide_db::{
     FxHashMap, FxIndexSet,
     base_db::{
-        AbsPathBuf, CrateOrigin, CrateWorkspaceData, Env, FileSet, SourceDatabase, VfsPath,
-        relevant_crates,
-        salsa::{Cancelled, Database, Durability},
+        AbsPathBuf, CrateOrigin, CrateWorkspaceData, Env, FileSet, LibraryRoots, LocalRoots, Nonce,
+        SourceDatabase, VfsPath, relevant_crates,
+        salsa::{Cancelled, Database, Durability, Revision},
     },
     line_index, prime_caches,
     ra_fixture::RaFixtureAnalysis,
@@ -86,6 +87,7 @@ use crate::navigation_target::ToNav;
 pub use crate::{
     annotations::{Annotation, AnnotationConfig, AnnotationKind, AnnotationLocation},
     call_hierarchy::{CallHierarchyConfig, CallItem},
+    ensure_import::ImportAssessment,
     expand_macro::ExpandedMacro,
     file_structure::{FileStructureConfig, StructureNode, StructureNodeKind},
     folding_ranges::{Fold, FoldKind},
@@ -244,6 +246,10 @@ pub struct Analysis {
     db: RootDatabase,
 }
 
+/// Exact identity of one database and its applied input revision.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InputStamp(Nonce, Revision);
+
 // As a general design guideline, `Analysis` API are intended to be independent
 // from the language server protocol. That is, when exposing some functionality
 // we should think in terms of "what API makes most sense" and not in terms of
@@ -319,6 +325,46 @@ impl Analysis {
     /// Debug info about the current state of the analysis.
     pub fn status(&self, file_id: Option<FileId>) -> Cancellable<String> {
         self.with_db(|db| status::status(db, file_id))
+    }
+
+    pub fn input_stamp(&self) -> Cancellable<InputStamp> {
+        self.with_db(|db| {
+            db.unwind_if_revision_cancelled();
+            let (nonce, revision) = db.nonce_and_revision();
+            InputStamp(nonce, revision)
+        })
+    }
+
+    /// Inventories paths from the same immutable database roots as semantic queries.
+    /// Returns `None` rather than a partial inventory if `limit` is exceeded.
+    pub fn input_files(&self, limit: usize) -> Cancellable<Option<Vec<(FileId, VfsPath)>>> {
+        self.with_db(|db| {
+            db.unwind_if_revision_cancelled();
+            let mut files = Vec::new();
+            for &root in
+                LocalRoots::get(db).roots(db).iter().chain(LibraryRoots::get(db).roots(db).iter())
+            {
+                let input = db.source_root(root);
+                let root = input.source_root(db);
+                for file in root.iter() {
+                    if files.len() == limit {
+                        return None;
+                    }
+                    files.push((file, root.path_for_file(&file).unwrap().clone()));
+                }
+            }
+            Some(files)
+        })
+    }
+
+    pub fn assess_import(
+        &self,
+        file_id: FileId,
+        scope: TextRange,
+        path: &str,
+        alias: Option<&str>,
+    ) -> Cancellable<ImportAssessment> {
+        self.with_db(|db| ensure_import::assess_import(db, file_id, scope, path, alias))
     }
 
     pub fn source_root_id(&self, file_id: FileId) -> Cancellable<SourceRootId> {

@@ -101,6 +101,7 @@ impl fmt::Display for Event {
 pub(crate) enum DeferredTask {
     CheckIfIndexed(lsp_types::Uri),
     CheckProcMacroSources(Vec<FileId>),
+    ConfigurationWitnessStale,
 }
 
 #[derive(Debug)]
@@ -615,10 +616,10 @@ impl GlobalState {
         if !self.fetch_workspaces_queue.op_in_progress() {
             if let Some((cause, ())) = self.fetch_build_data_queue.should_start_op() {
                 self.fetch_build_data(cause);
-            } else if let Some((cause, (change, paths))) =
+            } else if let Some((cause, (change, paths, origin))) =
                 self.fetch_proc_macros_queue.should_start_op()
             {
-                self.fetch_proc_macros(cause, change, paths);
+                self.fetch_proc_macros(cause, change, paths, origin);
             }
         }
 
@@ -878,9 +879,33 @@ impl GlobalState {
                 let (state, msg) = match progress {
                     ProjectWorkspaceProgress::Begin => (Progress::Begin, None),
                     ProjectWorkspaceProgress::Report(msg) => (Progress::Report, Some(msg)),
-                    ProjectWorkspaceProgress::End(workspaces, force_crate_graph_reload) => {
-                        let resp = FetchWorkspaceResponse { workspaces, force_crate_graph_reload };
+                    ProjectWorkspaceProgress::End(
+                        workspaces,
+                        force_crate_graph_reload,
+                        configuration,
+                    ) => {
+                        if !self.configuration_custody.is_current(&configuration, &self.config) {
+                            self.fetch_workspaces_queue.discard_completed();
+                            self.request_configuration_refresh("stale workspace generation");
+                            self.report_progress("Fetching", Progress::End, None, None, None);
+                            return None;
+                        }
+                        let retry = self.configuration_custody.observe(&configuration);
+                        let resp = FetchWorkspaceResponse {
+                            workspaces,
+                            force_crate_graph_reload,
+                            configuration,
+                        };
                         self.fetch_workspaces_queue.op_completed(resp);
+                        if retry {
+                            self.fetch_workspaces_queue.request_op(
+                                "configuration witness discovery".to_owned(),
+                                FetchWorkspaceRequest {
+                                    path: None,
+                                    force_crate_graph_reload: true,
+                                },
+                            );
+                        }
                         if let Err(e) = self.fetch_workspace_error() {
                             error!("FetchWorkspaceError: {e}");
                         }
@@ -933,9 +958,34 @@ impl GlobalState {
                 let (state, msg) = match progress {
                     BuildDataProgress::Begin => (Some(Progress::Begin), None),
                     BuildDataProgress::Report(msg) => (Some(Progress::Report), Some(msg)),
-                    BuildDataProgress::End((workspaces, build_scripts)) => {
-                        let resp = FetchBuildDataResponse { workspaces, build_scripts };
+                    BuildDataProgress::End((workspaces, build_scripts, configuration)) => {
+                        if !self.configuration_custody.is_current(&configuration, &self.config)
+                            || !triomphe::Arc::ptr_eq(&workspaces, &self.workspaces)
+                        {
+                            self.fetch_build_data_queue.discard_completed();
+                            self.request_configuration_refresh("stale build data generation");
+                            self.report_progress(
+                                "Building compile-time-deps",
+                                Progress::End,
+                                None,
+                                None,
+                                None,
+                            );
+                            return None;
+                        }
+                        let retry = self.configuration_custody.observe(&configuration);
+                        let resp =
+                            FetchBuildDataResponse { workspaces, build_scripts, configuration };
                         self.fetch_build_data_queue.op_completed(resp);
+                        if retry {
+                            self.fetch_workspaces_queue.request_op(
+                                "configuration witness discovery".to_owned(),
+                                FetchWorkspaceRequest {
+                                    path: None,
+                                    force_crate_graph_reload: true,
+                                },
+                            );
+                        }
 
                         if let Err(e) = self.fetch_build_data_error() {
                             error!("FetchBuildDataError: {e}");
@@ -956,11 +1006,18 @@ impl GlobalState {
                 let (state, msg) = match progress {
                     ProcMacroProgress::Begin => (Some(Progress::Begin), None),
                     ProcMacroProgress::Report(msg) => (Some(Progress::Report), Some(msg)),
-                    ProcMacroProgress::End(change) => {
-                        self.fetch_proc_macros_queue.op_completed(true);
-                        cancellation_time = Some(self.analysis_host.apply_change(change));
-                        // FIXME This feels a bit off, this should go through similar machinery as build scripts?
-                        _ = self.finish_loading_crate_graph();
+                    ProcMacroProgress::End(change, workspaces, configuration) => {
+                        let current =
+                            self.configuration_custody.is_current(&configuration, &self.config)
+                                && triomphe::Arc::ptr_eq(&workspaces, &self.workspaces);
+                        self.fetch_proc_macros_queue.op_completed(current);
+                        if current {
+                            cancellation_time = Some(self.analysis_host.apply_change(change));
+                            self.configuration_custody.publish(configuration.witness);
+                            _ = self.finish_loading_crate_graph();
+                        } else {
+                            self.request_configuration_refresh("stale proc macro generation");
+                        }
                         (Some(Progress::End), None)
                     }
                 };
@@ -969,7 +1026,10 @@ impl GlobalState {
                     self.report_progress("Loading proc-macros", state, msg, None, None);
                 }
             }
-            Task::BuildDepsHaveChanged => self.build_deps_changed = true,
+            Task::BuildDepsHaveChanged => {
+                self.configuration_custody.invalidate();
+                self.build_deps_changed = true;
+            }
             Task::DiscoverTest(tests) => {
                 self.send_notification::<lsp_ext::DiscoveredTestsNotification>(tests);
             }
@@ -1084,6 +1144,9 @@ impl GlobalState {
 
     fn handle_deferred_task(&mut self, task: DeferredTask) {
         match task {
+            DeferredTask::ConfigurationWitnessStale => {
+                self.request_configuration_refresh("configuration witness stale");
+            }
             DeferredTask::CheckIfIndexed(uri) => {
                 let snap = self.snapshot();
 
@@ -1418,6 +1481,8 @@ impl GlobalState {
             .on::<RETRY, lsp_ext::DiscoverTestRequest>(handlers::handle_discover_test)
             .on::<RETRY, lsp_ext::WorkspaceSymbolRequest>(handlers::handle_workspace_symbol)
             .on::<NO_RETRY, lsp_ext::SsrRequest>(handlers::handle_ssr)
+            .on_guarded::<NO_RETRY, lsp_ext::AssessImportRequest>(crate::handlers::imports::handle_assess_import)
+            .on_guarded::<NO_RETRY, lsp_ext::ImportStampRequest>(crate::handlers::imports::handle_import_stamp)
             .on::<NO_RETRY, lsp_ext::ViewRecursiveMemoryLayoutRequest>(handlers::handle_view_recursive_memory_layout)
             .on::<NO_RETRY, lsp_ext::ViewSyntaxTreeRequest>(handlers::handle_view_syntax_tree)
             .on::<NO_RETRY, lsp_ext::ViewHirRequest>(handlers::handle_view_hir)

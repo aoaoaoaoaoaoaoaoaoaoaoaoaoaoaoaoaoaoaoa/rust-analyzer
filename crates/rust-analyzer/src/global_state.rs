@@ -59,11 +59,13 @@ pub(crate) struct FetchWorkspaceRequest {
 pub(crate) struct FetchWorkspaceResponse {
     pub(crate) workspaces: Vec<anyhow::Result<ProjectWorkspace>>,
     pub(crate) force_crate_graph_reload: bool,
+    pub(crate) configuration: Box<crate::configuration_custody::ConfigurationLoad>,
 }
 
 pub(crate) struct FetchBuildDataResponse {
     pub(crate) workspaces: Arc<Vec<ProjectWorkspace>>,
     pub(crate) build_scripts: Vec<anyhow::Result<WorkspaceBuildScripts>>,
+    pub(crate) configuration: Box<crate::configuration_custody::ConfigurationLoad>,
 }
 
 // Enforces drop order
@@ -175,13 +177,21 @@ pub(crate) struct GlobalState {
     /// the user just adds comments or whitespace to Cargo.toml, we do not want
     /// to invalidate any salsa caches.
     pub(crate) workspaces: Arc<Vec<ProjectWorkspace>>,
+    pub(crate) configuration_custody: crate::configuration_custody::ConfigurationCustody,
     pub(crate) crate_graph_file_dependencies: FxHashSet<vfs::VfsPath>,
     pub(crate) detached_files: FxHashSet<ManifestPath>,
 
     // op queues
     pub(crate) fetch_workspaces_queue: OpQueue<FetchWorkspaceRequest, FetchWorkspaceResponse>,
     pub(crate) fetch_build_data_queue: OpQueue<(), FetchBuildDataResponse>,
-    pub(crate) fetch_proc_macros_queue: OpQueue<(ChangeWithProcMacros, Vec<ProcMacroPaths>), bool>,
+    pub(crate) fetch_proc_macros_queue: OpQueue<
+        (
+            ChangeWithProcMacros,
+            Vec<ProcMacroPaths>,
+            crate::configuration_custody::ConfigurationOrigin,
+        ),
+        bool,
+    >,
     pub(crate) prime_caches_queue: OpQueue,
 
     /// A deferred task queue.
@@ -223,6 +233,11 @@ pub(crate) struct GlobalStateSnapshot {
     // proc-macros have been loaded
     // FIXME: Can we derive this from somewhere else?
     pub(crate) proc_macros_loaded: bool,
+    pub(crate) import_inputs_ready: bool,
+    pub(crate) configuration_witness:
+        Option<Arc<crate::configuration_custody::ConfigurationWitness>>,
+    configuration_reload: Sender<crate::main_loop::DeferredTask>,
+    configuration_refresh_needed: bool,
     pub(crate) flycheck: Arc<[FlycheckHandle]>,
     minicore: MiniCoreRustAnalyzerInternalOnly,
 }
@@ -318,6 +333,7 @@ impl GlobalState {
             wants_to_switch: None,
 
             workspaces: Arc::from(Vec::new()),
+            configuration_custody: Default::default(),
             crate_graph_file_dependencies: FxHashSet::default(),
             detached_files: FxHashSet::default(),
             fetch_workspaces_queue: OpQueue::default(),
@@ -575,6 +591,9 @@ impl GlobalState {
         GlobalStateSnapshot {
             config: Arc::clone(&self.config),
             workspaces: Arc::clone(&self.workspaces),
+            configuration_witness: self.configuration_custody.active(&self.config),
+            configuration_reload: self.deferred_task_queue.sender.clone(),
+            configuration_refresh_needed: self.configuration_custody.needs_refresh(&self.config),
             analysis: self.analysis_host.analysis(),
             vfs: Arc::clone(&self.vfs),
             minicore: self.minicore.clone(),
@@ -583,6 +602,16 @@ impl GlobalState {
             semantic_tokens_cache: Arc::clone(&self.semantic_tokens_cache),
             proc_macros_loaded: !self.config.expand_proc_macros()
                 || self.fetch_proc_macros_queue.last_op_result().copied().unwrap_or(false),
+            import_inputs_ready: self.is_quiescent()
+                && !self.fetch_workspaces_queue.op_requested()
+                && !self.fetch_build_data_queue.op_requested()
+                && !self.fetch_proc_macros_queue.op_requested()
+                && !self.build_deps_changed
+                && !self.incomplete_crate_graph
+                && self.config_errors.is_none()
+                && self.fetch_workspace_error().is_ok()
+                && self.fetch_build_data_error().is_ok()
+                && !self.workspaces.is_empty(),
             flycheck: self.flycheck.clone(),
         }
     }
@@ -723,6 +752,7 @@ impl GlobalState {
     }
 
     fn enqueue_workspace_fetch(&mut self, path: AbsPathBuf, force_crate_graph_reload: bool) {
+        self.configuration_custody.invalidate();
         let already_requested = self.fetch_workspaces_queue.op_requested()
             && !self.fetch_workspaces_queue.op_in_progress();
         if self.fetch_ws_receiver.is_none() && already_requested {
@@ -823,6 +853,18 @@ impl Drop for GlobalState {
 }
 
 impl GlobalStateSnapshot {
+    pub(crate) fn request_configuration_reload(&self) {
+        let _ = self
+            .configuration_reload
+            .send(crate::main_loop::DeferredTask::ConfigurationWitnessStale);
+    }
+
+    pub(crate) fn request_configuration_reload_if_needed(&self) {
+        if self.configuration_refresh_needed {
+            self.request_configuration_reload();
+        }
+    }
+
     fn vfs_read(&self) -> MappedRwLockReadGuard<'_, vfs::Vfs> {
         RwLockReadGuard::map(self.vfs.read(), |(it, _)| it)
     }

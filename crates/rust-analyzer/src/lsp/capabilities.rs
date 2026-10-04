@@ -188,6 +188,7 @@ pub fn server_capabilities(config: &Config) -> ServerCapabilities {
                 "kinds": [ "cargo" ],
             },
             "ssr": true,
+            "semeditImports": { "version": 1 },
             "workspaceSymbolScopeKindFiltering": true,
         })),
         type_hierarchy_provider: None,

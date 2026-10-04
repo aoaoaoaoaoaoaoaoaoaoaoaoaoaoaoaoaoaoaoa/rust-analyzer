@@ -51,6 +51,7 @@ pub mod assoc;
 pub mod attr_resolution;
 mod collector;
 pub mod diagnostics;
+pub mod import_scope;
 mod mod_resolution;
 mod path_resolution;
 pub mod proc_macro;

@@ -25,6 +25,7 @@ extern crate ra_ap_rustc_type_ir as rustc_type_ir;
 mod attrs;
 mod from_id;
 mod has_source;
+mod import_scope;
 mod semantics;
 mod source_analyzer;
 
@@ -147,6 +148,7 @@ pub use crate::{
     attrs::{AttrsWithOwner, HasAttrs, resolve_doc_path_on},
     diagnostics::*,
     has_source::HasSource,
+    import_scope::{ImportBindingAssessment, ImportBindingConflict, ImportBindingUnknown},
     semantics::{
         LintAttr, PathResolution, PathResolutionPerNs, Semantics, SemanticsImpl, SemanticsScope,
         TypeInfo, VisibleTraits,

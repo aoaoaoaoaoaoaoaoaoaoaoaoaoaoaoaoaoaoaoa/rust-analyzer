@@ -31,6 +31,7 @@ pub const MINIMUM_SUPPORTED_TOOLCHAIN_VERSION: semver::Version = semver::Version
 pub mod cli;
 
 mod command;
+mod configuration_custody;
 mod diagnostics;
 mod discover;
 mod flycheck;
@@ -40,6 +41,7 @@ mod mem_docs;
 mod op_queue;
 mod priming_scope;
 mod reload;
+mod rustc_wrapper;
 mod target_spec;
 mod task_pool;
 mod test_runner;
@@ -47,6 +49,7 @@ mod version;
 
 mod handlers {
     pub(crate) mod dispatch;
+    pub(crate) mod imports;
     pub(crate) mod notification;
     pub(crate) mod request;
 }
@@ -62,6 +65,8 @@ pub mod config;
 mod global_state;
 pub mod lsp;
 pub mod session;
+
+pub use rustc_wrapper::run as run_rustc_wrapper;
 
 use self::lsp::ext as lsp_ext;
 

@@ -27,6 +27,25 @@ impl IoThreads {
     }
 }
 
+/// Runs a standalone LSP server on standard input and output without parsing arguments.
+///
+/// The caller initializes logging before entry; log output must not use standard output.
+/// This initializes the global Rayon pool and runs the session on a larger-stack thread.
+pub fn run_stdio() -> anyhow::Result<()> {
+    stdx::thread::Builder::new(stdx::thread::ThreadIntent::LatencySensitive, "LspServer")
+        .spawn(|| {
+            rayon::ThreadPoolBuilder::new()
+                .thread_name(|ix| format!("RayonWorker{ix}"))
+                .stack_size(stdx::thread::DEFAULT_STACK_SIZE)
+                .build_global()
+                .context("failed to initialize Rayon thread pool")?;
+
+            let (connection, io_threads) = Connection::stdio();
+            run_session(connection, IoThreads::Stdio(io_threads), None)
+        })?
+        .join()
+}
+
 /// Runs a full LSP session over `connection`: waits for the client's `initialize`,
 /// negotiates capabilities, then runs the main loop until the client disconnects or
 /// requests shutdown.

@@ -24,6 +24,77 @@ use serde::{Deserialize, Serialize};
 
 pub enum InternalTestingFetchConfigRequest {}
 
+pub enum AssessImportRequest {}
+
+impl Request for AssessImportRequest {
+    type Params = AssessImportParams;
+    type Result = AssessImportResult;
+    const METHOD: LspRequestMethod<'_> = LspRequestMethod::new("rust-analyzer/assessImport");
+    const MESSAGE_DIRECTION: MessageDirection = MessageDirection::ClientToServer;
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssessImportParams {
+    pub text_document: TextDocumentIdentifier,
+    pub scope: ImportByteRange,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    pub expected_sha256: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportByteRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImportDecision {
+    AlreadyAvailable,
+    Insert,
+    Conflict,
+    Unknown,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssessImportResult {
+    pub decision: ImportDecision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub stamp: String,
+    pub dependencies: Vec<ImportDependency>,
+    pub config_paths: Vec<Uri>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ImportDependency {
+    pub uri: Uri,
+    pub sha256: String,
+}
+
+pub enum ImportStampRequest {}
+
+impl Request for ImportStampRequest {
+    type Params = ImportStampParams;
+    type Result = ImportStampResult;
+    const METHOD: LspRequestMethod<'_> = LspRequestMethod::new("rust-analyzer/importStamp");
+    const MESSAGE_DIRECTION: MessageDirection = MessageDirection::ClientToServer;
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportStampParams {}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ImportStampResult {
+    pub stamp: String,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 pub enum InternalTestingFetchConfigOption {
     AssistEmitMustUse,

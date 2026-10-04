@@ -8,12 +8,9 @@
 #[cfg(feature = "in-rust-tree")]
 extern crate rustc_driver as _;
 
-mod rustc_wrapper;
-
 use std::{env, fs, path::PathBuf, process::ExitCode, sync::Arc};
 
 use anyhow::Context;
-use lsp_server::Connection;
 use rust_analyzer::{cli::flags, config::Config};
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
@@ -27,7 +24,7 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 fn main() -> anyhow::Result<ExitCode> {
     if std::env::var("RA_RUSTC_WRAPPER").is_ok() {
-        rustc_wrapper::main().map_err(Into::into)
+        rust_analyzer::run_rustc_wrapper().map_err(Into::into)
     } else {
         actual_main()
     }
@@ -58,15 +55,7 @@ fn actual_main() -> anyhow::Result<ExitCode> {
                 break 'lsp_server;
             }
 
-            // rust-analyzer’s “main thread” is actually
-            // a secondary latency-sensitive thread with an increased stack size.
-            // We use this thread intent because any delay in the main loop
-            // will make actions like hitting enter in the editor slow.
-            with_extra_thread(
-                "LspServer",
-                stdx::thread::ThreadIntent::LatencySensitive,
-                move || run_server(None),
-            )?;
+            rust_analyzer::session::run_stdio()?;
         }
         flags::RustAnalyzerCmd::Parse(cmd) => cmd.run()?,
         flags::RustAnalyzerCmd::Symbols(cmd) => cmd.run()?,
@@ -164,35 +153,4 @@ fn setup_logging(log_file_flag: Option<PathBuf>) -> anyhow::Result<()> {
     .init()?;
 
     Ok(())
-}
-
-/// Parts of rust-analyzer can use a lot of stack space, and some operating systems only give us
-/// 1 MB by default (eg. Windows), so this spawns a new thread with hopefully sufficient stack
-/// space.
-fn with_extra_thread(
-    thread_name: impl Into<String>,
-    thread_intent: stdx::thread::ThreadIntent,
-    f: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
-) -> anyhow::Result<()> {
-    let handle = stdx::thread::Builder::new(thread_intent, thread_name).spawn(f)?;
-
-    handle.join()?;
-
-    Ok(())
-}
-
-fn run_server(startup_notice: Option<String>) -> anyhow::Result<()> {
-    let (connection, io_threads) = Connection::stdio();
-
-    rayon::ThreadPoolBuilder::new()
-        .thread_name(|ix| format!("RayonWorker{}", ix))
-        .stack_size(stdx::thread::DEFAULT_STACK_SIZE)
-        .build_global()
-        .unwrap();
-
-    rust_analyzer::session::run_session(
-        connection,
-        rust_analyzer::session::IoThreads::Stdio(io_threads),
-        startup_notice,
-    )
 }
