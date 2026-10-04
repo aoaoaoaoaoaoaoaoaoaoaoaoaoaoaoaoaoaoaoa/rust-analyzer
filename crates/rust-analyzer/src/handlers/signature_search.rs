@@ -39,10 +39,7 @@ fn record_source(
     revisions.entries.insert(uri, hash.clone());
     Ok(hash)
 }
-use crate::{
-    global_state::GlobalStateSnapshot,
-    lsp::{signature as wire, to_proto},
-};
+use crate::{global_state::GlobalStateSnapshot, lsp::signature as wire};
 
 pub(crate) fn handle_sem_signature_search(
     snap: GlobalStateSnapshot,
@@ -351,15 +348,6 @@ pub(crate) fn handle_sem_signature_search(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let config_revisions = snap
-        .configuration_witness
-        .iter()
-        .flat_map(|witness| witness.file_revisions())
-        .map(|(path, hash)| wire::SourceRevision {
-            uri: to_proto::url_from_abs_path(path).to_string(),
-            sha256: hash.iter().map(|byte| format!("{byte:02x}")).collect(),
-        })
-        .collect();
     let result = wire::SignatureBatch {
         context_sha256,
         stamp,
@@ -368,7 +356,6 @@ pub(crate) fn handle_sem_signature_search(
             .into_iter()
             .map(|(uri, sha256)| wire::SourceRevision { uri, sha256 })
             .collect(),
-        config_revisions,
         candidates,
         coverage: wire::SignatureCoverage {
             examined: batch.coverage.examined,

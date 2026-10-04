@@ -232,7 +232,6 @@ pub struct SignatureBatch {
     pub context_sha256: String,
     pub stamp: String,
     pub source_revisions: Vec<SourceRevision>,
-    pub config_revisions: Vec<SourceRevision>,
     pub candidates: Vec<SignatureCandidate>,
     pub coverage: SignatureCoverage,
 }

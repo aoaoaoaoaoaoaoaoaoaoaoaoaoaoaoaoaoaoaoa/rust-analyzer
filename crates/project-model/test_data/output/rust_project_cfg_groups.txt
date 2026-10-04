@@ -19,6 +19,7 @@
             ),
         },
         extra: ExtraCrateData {
+            is_workspace_member: true,
             version: None,
             display_name: Some(
                 CrateDisplayName {
@@ -70,6 +71,7 @@
             ),
         },
         extra: ExtraCrateData {
+            is_workspace_member: true,
             version: None,
             display_name: Some(
                 CrateDisplayName {

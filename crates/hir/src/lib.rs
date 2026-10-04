@@ -257,6 +257,10 @@ impl Crate {
         self.id.data(db).origin.clone()
     }
 
+    pub fn is_workspace_member(self, db: &dyn HirDatabase) -> bool {
+        self.id.extra_data(db).is_workspace_member
+    }
+
     pub fn is_builtin(self, db: &dyn HirDatabase) -> bool {
         matches!(self.origin(db), CrateOrigin::Lang(_))
     }

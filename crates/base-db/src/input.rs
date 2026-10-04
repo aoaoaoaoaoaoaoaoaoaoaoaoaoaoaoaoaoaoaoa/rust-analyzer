@@ -376,6 +376,8 @@ pub type BuiltCrateData = CrateData<Crate>;
 /// Crate data unrelated to analysis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtraCrateData {
+    /// Native project membership, independent of local source/editability.
+    pub is_workspace_member: bool,
     pub version: Option<String>,
     /// A name used in the package's project declaration: for Cargo projects,
     /// its `[package].name` can be different for other project types or even
@@ -565,11 +567,20 @@ impl CrateGraphBuilder {
                 is_proc_macro,
                 proc_macro_cwd,
             },
-            extra: ExtraCrateData { version, display_name, potential_cfg_options },
+            extra: ExtraCrateData {
+                is_workspace_member: false,
+                version,
+                display_name,
+                potential_cfg_options,
+            },
             cfg_options,
             env,
             ws_data,
         })
+    }
+
+    pub fn set_workspace_member(&mut self, krate: CrateBuilderId, is_workspace_member: bool) {
+        self.arena[krate].extra.is_workspace_member = is_workspace_member;
     }
 
     pub fn add_dep(

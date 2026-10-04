@@ -337,6 +337,7 @@ impl ChangeFixture {
             }
 
             if let Some((krate, origin, version)) = meta.krate {
+                let is_workspace_member = origin.is_local();
                 let crate_name = CrateName::normalize_dashes(&krate);
                 let crate_id = crate_graph.add_crate_root(
                     file_id,
@@ -353,6 +354,7 @@ impl ChangeFixture {
                     crate_ws_data.clone(),
                 );
                 let prev = crates.insert(crate_name.clone(), crate_id);
+                crate_graph.set_workspace_member(crate_id, is_workspace_member);
                 assert!(prev.is_none(), "multiple crates with same name: {crate_name}");
                 for dep in meta.deps {
                     let prelude = match &meta.extern_prelude {
@@ -440,6 +442,7 @@ impl ChangeFixture {
             if let Some((mini_core, _)) = mini_core {
                 crate_graph.add_dep(root, mini_core()).unwrap();
             }
+            crate_graph.set_workspace_member(root, true);
         } else {
             // Insert minicore first to match with `project-model::workspace`
             if let Some((mini_core, core_crate)) = mini_core {

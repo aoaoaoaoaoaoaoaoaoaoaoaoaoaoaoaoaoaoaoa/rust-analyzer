@@ -287,7 +287,7 @@ impl Analysis {
 
         let crate_attrs = Vec::new();
         cfg_options.insert_atom(sym::test);
-        crate_graph.add_crate_root(
+        let root = crate_graph.add_crate_root(
             file_id,
             Edition::CURRENT,
             None,
@@ -304,6 +304,7 @@ impl Analysis {
                 toolchain: None,
             }),
         );
+        crate_graph.set_workspace_member(root, true);
         change.change_file(file_id, Some(text));
         change.set_crate_graph(crate_graph);
 

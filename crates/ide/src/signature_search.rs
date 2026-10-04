@@ -125,6 +125,7 @@ pub struct SignatureCoverage {
     pub unsearched: Vec<String>,
     pub warnings: Vec<String>,
     pub exclusions: BTreeMap<String, u32>,
+    pub incomplete_modules: Vec<(hir::ImportBindingUnknown, u32)>,
     pub complete: bool,
 }
 #[derive(Debug, Clone)]
@@ -291,7 +292,7 @@ pub(crate) fn search(
         .map(|input| compile(&sema, &query.context, module, input))
         .transpose()?;
     let workspace: FxHashSet<_> =
-        Crate::all(db).into_iter().filter(|krate| krate.origin(db).is_local()).collect();
+        Crate::all(db).into_iter().filter(|krate| krate.is_workspace_member(db)).collect();
     let direct_dependencies: FxHashSet<_> = workspace
         .iter()
         .flat_map(|krate| krate.dependencies(db).into_iter().map(|dependency| dependency.krate))
@@ -371,12 +372,18 @@ pub(crate) fn search(
         if seen_modules.len() > 100_000 {
             return Ok(enumeration_limit(batch, &queues, "module traversal budget exhausted"));
         }
-        if module.import_scope_status(db).is_err() {
+        if let Err(reason) = module.import_scope_status(db) {
             batch.coverage.complete = false;
-            batch
+            if let Some((_, count)) = batch
                 .coverage
-                .warnings
-                .push(format!("incomplete syntax/macro/definition evidence in {module:?}"));
+                .incomplete_modules
+                .iter_mut()
+                .find(|(category, _)| *category == reason)
+            {
+                *count += 1;
+            } else {
+                batch.coverage.incomplete_modules.push((reason, 1));
+            }
         }
         let mut declarations = Vec::new();
         let mut bodies = Vec::new();
@@ -621,6 +628,12 @@ fn in_scope(scope: &SearchScope, location: FileRange) -> bool {
     }
 }
 fn finish(mut batch: SignatureBatch) -> SignatureBatch {
+    for (reason, count) in &batch.coverage.incomplete_modules {
+        batch
+            .coverage
+            .warnings
+            .push(format!("Incomplete module evidence: {reason:?} ({count} modules)."));
+    }
     for (reason, count) in &batch.coverage.exclusions {
         batch.coverage.warnings.push(format!("Excluded {count} {reason}."));
     }
@@ -977,7 +990,7 @@ mod tests {
 
     #[test]
     fn semantic_signature_interactions() {
-        let (analysis, position) = fixture::position(
+        let mut change = test_fixture::ChangeFixture::parse(
             r#"
 //- minicore: sized, deref, future
 //- /lib.rs crate:app deps:dep
@@ -1011,12 +1024,29 @@ impl New {fn method(&self,x:Foo)->Foo {x}}
 #[cfg(disabled)] fn excluded()->Foo {Foo}
 macro_rules! produce {()=>{fn generated()->Foo {Foo}};}
 produce!();
+mod damaged_a {unresolved_macro!();}
+mod damaged_b {unresolved_macro!();}
 pub use plain as reexport;
-//- /dep.rs crate:dep library
+//- /dep.rs crate:dep
 pub struct Foo;
 pub fn dependency()->Foo {Foo}
 "#,
         );
+        let graph = change.change.source_change.crate_graph.as_mut().unwrap();
+        let dependency = graph
+            .iter()
+            .find(|id| {
+                graph[*id].extra.display_name.as_ref().is_some_and(|name| name.to_string() == "dep")
+            })
+            .unwrap();
+        assert!(graph[dependency].basic.origin.is_local());
+        graph.set_workspace_member(dependency, false);
+        let file_id = change.file_position.unwrap().0.file_id();
+        let mut host = crate::AnalysisHost::default();
+        host.db.enable_proc_attr_macros();
+        host.db.apply_change(change.change);
+        let analysis = host.analysis();
+        let position = crate::FilePosition { file_id, offset: 0.into() };
         let base = SignatureQuery {
             context: SignatureAnchor { file_id: position.file_id, range: None, context_id: None },
             inputs: None,
@@ -1034,6 +1064,17 @@ pub fn dependency()->Foo {Foo}
             batch.candidates.iter().map(|c| c.qualified_name.as_str()).collect::<Vec<_>>().join(",")
         };
         let batch = run(base.clone());
+        assert!(!batch.coverage.complete);
+        assert!(batch.coverage.incomplete_modules.iter().any(|(_, count)| *count >= 2));
+        assert_eq!(
+            batch
+                .coverage
+                .warnings
+                .iter()
+                .filter(|warning| warning.starts_with("Incomplete module evidence:"))
+                .count(),
+            batch.coverage.incomplete_modules.len()
+        );
         for name in ["plain", "alias", "borrowed", "local", "generated", "method"] {
             assert!(
                 batch.candidates.iter().any(|c| c.qualified_name.ends_with(name)),
@@ -1147,6 +1188,7 @@ pub fn dependency()->Foo {Foo}
         let dependencies = run(dependencies);
         let dependency =
             dependencies.candidates.iter().find(|c| c.qualified_name == "dependency").unwrap();
+        assert!(!dependency.workspace);
         let CandidateSource::Physical { range, name_offset } = dependency.source else {
             panic!("physical dependency fixture")
         };

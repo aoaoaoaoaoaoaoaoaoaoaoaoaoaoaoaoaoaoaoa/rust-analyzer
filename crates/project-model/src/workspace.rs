@@ -1226,6 +1226,10 @@ fn project_json_to_crate_graph(
                     crate = display_name.as_ref().map(|name| name.canonical_name().as_str()),
                     "added root to crate graph"
                 );
+                crate_graph.set_workspace_member(
+                    crate_graph_crate_id,
+                    *is_workspace_member && !is_sysroot,
+                );
                 if *is_proc_macro && let Some(path) = proc_macro_dylib_path.clone() {
                     let node = Ok((
                         display_name
@@ -1527,6 +1531,7 @@ fn detached_file_to_crate_graph(
     );
 
     public_deps.add_to_crate_graph(&mut crate_graph, detached_file_crate);
+    crate_graph.set_workspace_member(detached_file_crate, true);
     (crate_graph, FxHashMap::default())
 }
 
@@ -1692,6 +1697,7 @@ fn add_target_crate_root(
     if let Some(envs) = build_data.map(|(it, _)| &it.envs) {
         env.extend_from_other(envs);
     }
+    let is_workspace_member = pkg.is_member && !cargo.is_sysroot() && origin.is_local();
     let crate_id = crate_graph.add_crate_root(
         file_id,
         edition,
@@ -1706,6 +1712,7 @@ fn add_target_crate_root(
         proc_macro_cwd,
         crate_ws_data,
     );
+    crate_graph.set_workspace_member(crate_id, is_workspace_member);
     if let TargetKind::Lib { is_proc_macro: true } = kind {
         let proc_macro = match build_data {
             Some((BuildScriptOutput { proc_macro_dylib_path, .. }, has_errors)) => {

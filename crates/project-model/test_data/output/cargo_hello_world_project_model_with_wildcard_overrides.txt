@@ -28,6 +28,7 @@
             ),
         },
         extra: ExtraCrateData {
+            is_workspace_member: true,
             version: Some(
                 "0.1.0",
             ),
@@ -113,6 +114,7 @@
             ),
         },
         extra: ExtraCrateData {
+            is_workspace_member: true,
             version: Some(
                 "0.1.0",
             ),
@@ -198,6 +200,7 @@
             ),
         },
         extra: ExtraCrateData {
+            is_workspace_member: true,
             version: Some(
                 "0.1.0",
             ),
@@ -283,6 +286,7 @@
             ),
         },
         extra: ExtraCrateData {
+            is_workspace_member: true,
             version: Some(
                 "0.1.0",
             ),
@@ -351,6 +355,7 @@
             ),
         },
         extra: ExtraCrateData {
+            is_workspace_member: false,
             version: Some(
                 "0.2.98",
             ),
