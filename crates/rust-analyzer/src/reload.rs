@@ -84,10 +84,6 @@ impl GlobalState {
         if !self.fetch_workspaces_queue.op_requested()
             && !self.fetch_workspaces_queue.op_in_progress()
             && self.fetch_ws_receiver.is_none()
-            && !self.fetch_build_data_queue.op_requested()
-            && !self.fetch_build_data_queue.op_in_progress()
-            && !self.fetch_proc_macros_queue.op_requested()
-            && !self.fetch_proc_macros_queue.op_in_progress()
         {
             self.configuration_custody.invalidate();
             self.fetch_workspaces_queue.request_op(
@@ -821,7 +817,10 @@ impl GlobalState {
             version: self.vfs_config_version,
         });
         self.source_root_config = project_folders.source_root_config;
-        self.local_roots_parent_map = Arc::new(self.source_root_config.source_root_parent_map());
+        let source_root_parent_map = self.source_root_config.source_root_parent_map();
+        if *self.local_roots_parent_map != source_root_parent_map {
+            self.local_roots_parent_map = Arc::new(source_root_parent_map);
+        }
 
         info!(?cause, "recreating the crate graph");
         let cancellation_time = self.recreate_crate_graph(cause, switching_from_empty_workspace);

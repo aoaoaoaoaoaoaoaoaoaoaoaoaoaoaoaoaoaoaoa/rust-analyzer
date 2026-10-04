@@ -560,6 +560,9 @@ impl GlobalState {
             } else {
                 // No global or client level config was changed. So we can naively replace config.
                 self.config = Arc::new(config);
+                if self.configuration_custody.needs_refresh(&self.config) {
+                    self.request_configuration_refresh("derived configuration changed");
+                }
             }
         }
 

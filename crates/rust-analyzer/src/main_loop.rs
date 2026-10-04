@@ -1012,9 +1012,19 @@ impl GlobalState {
                                 && triomphe::Arc::ptr_eq(&workspaces, &self.workspaces);
                         self.fetch_proc_macros_queue.op_completed(current);
                         if current {
+                            let retry = self.configuration_custody.observe(&configuration);
                             cancellation_time = Some(self.analysis_host.apply_change(change));
                             self.configuration_custody.publish(configuration.witness);
                             _ = self.finish_loading_crate_graph();
+                            if retry {
+                                self.fetch_workspaces_queue.request_op(
+                                    "configuration witness discovery".to_owned(),
+                                    FetchWorkspaceRequest {
+                                        path: None,
+                                        force_crate_graph_reload: true,
+                                    },
+                                );
+                            }
                         } else {
                             self.request_configuration_refresh("stale proc macro generation");
                         }

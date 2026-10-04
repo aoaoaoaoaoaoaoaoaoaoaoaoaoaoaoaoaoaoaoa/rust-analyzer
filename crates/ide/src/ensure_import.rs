@@ -222,10 +222,29 @@ impl Impact<'_, '_> {
                     let expansions = self.sema.expand_derive_macro(&meta);
                     let has_derive = expansions.is_some();
                     if let Some(expansions) = expansions {
-                        for expanded in expansions {
-                            let expanded = expanded.ok_or(Refusal::Unknown(
-                                "dependent derive macro has no expansion",
+                        let macros = self.sema.resolve_derive_macro(&meta).ok_or(
+                            Refusal::Unknown("dependent derive macro has no resolved identity"),
+                        )?;
+                        if macros.len() != expansions.len() {
+                            return Err(Refusal::Unknown(
+                                "dependent derive identities and expansions are not aligned",
+                            ));
+                        }
+                        for (expanded, macro_) in expansions.into_iter().zip(macros) {
+                            let macro_ = macro_.ok_or(Refusal::Unknown(
+                                "dependent derive macro has no resolved identity",
                             ))?;
+                            let Some(expanded) = expanded else {
+                                // BuiltinDeriveImplId intentionally has no syntax
+                                // expansion. Its resolved builtin identity is the
+                                // analyzer's evidence, not a missing proc output.
+                                if macro_.builtin_derive_kind(self.sema.db).is_some() {
+                                    continue;
+                                }
+                                return Err(Refusal::Unknown(
+                                    "dependent derive macro has no expansion",
+                                ));
+                            };
                             if expanded.err.is_some() {
                                 return Err(Refusal::Unknown(
                                     "dependent derive expansion reported an error",
@@ -239,7 +258,10 @@ impl Impact<'_, '_> {
                             && meta.path().is_some_and(|path| {
                                 matches!(
                                     self.sema.resolve_path(&path),
-                                    Some(PathResolution::BuiltinAttr(_))
+                                    Some(
+                                        PathResolution::BuiltinAttr(_)
+                                            | PathResolution::DeriveHelper(_)
+                                    )
                                 )
                             });
                         if !known_inert {
@@ -422,6 +444,35 @@ mod tests {
 
     #[test]
     fn expansion_inputs_and_outputs_remain_in_the_impact_boundary() {
+        // Builtin derives may have no syntax tree; proc derives still supply
+        // their output, and active derive helpers are inert attributes.
+        assert_eq!(
+            assess(
+                r#"
+//- proc_macros: derive_identity
+//- minicore: clone, default, derive
+mod api { pub struct Token; }
+#[derive(Clone, proc_macros::DeriveIdentity)]
+struct Data {}
+#[derive(Default)]
+enum Mode { #[default] Idle }
+"#,
+                "crate::api::Token"
+            ),
+            ImportAssessment::Insert,
+        );
+        assert!(matches!(
+            assess(
+                r#"
+//- minicore: clone, derive
+mod api { pub struct Token; }
+#[derive(Clone, MissingDerive)]
+struct Data {}
+"#,
+                "crate::api::Token"
+            ),
+            ImportAssessment::Unknown(_)
+        ));
         let (analysis, range) = fixture::range(
             r#"
 mod api { pub const Token: u8 = 1; }

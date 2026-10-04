@@ -711,5 +711,12 @@ mod tests {
         }
         .begin();
         assert!(attempt.before.is_err());
+        // A dependent stage may complete normally while its input witness fails.
+        // Its completion must carry recovery, not publish an unwitnessed model.
+        let load = attempt.finish(&[]);
+        assert!(load.witness.is_none());
+        assert!(custody.observe(&load));
+        custody.publish(load.witness);
+        assert!(custody.active.is_none());
     }
 }
