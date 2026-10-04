@@ -18,7 +18,7 @@ const MAX_INPUT_BYTES: usize = 256 * 1024 * 1024;
 
 struct StampHasher(Sha256);
 
-enum WitnessUse {
+pub(super) enum WitnessUse {
     Assessment,
     Recheck,
 }
@@ -34,7 +34,7 @@ impl Hasher for StampHasher {
     }
 }
 
-fn stamp_digest(snap: &GlobalStateSnapshot, stamp: InputStamp) -> String {
+pub(super) fn stamp_digest(snap: &GlobalStateSnapshot, stamp: InputStamp) -> String {
     let mut hasher = StampHasher(Sha256::new());
     hasher.0.update(b"semedit-imports-input-stamp-v1");
     stamp.hash(&mut hasher);
@@ -47,11 +47,11 @@ fn stamp_digest(snap: &GlobalStateSnapshot, stamp: InputStamp) -> String {
     format!("{:x}", hasher.0.finalize())
 }
 
-fn text_digest(text: &str) -> String {
+pub(super) fn text_digest(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
-fn ready(snap: &GlobalStateSnapshot) -> anyhow::Result<()> {
+pub(super) fn ready(snap: &GlobalStateSnapshot) -> anyhow::Result<()> {
     anyhow::ensure!(
         snap.import_inputs_ready && snap.proc_macros_loaded,
         "import analysis inputs are incomplete or a reload is pending"
@@ -61,7 +61,10 @@ fn ready(snap: &GlobalStateSnapshot) -> anyhow::Result<()> {
 
 /// Applied Salsa inputs cannot attest to unmodeled files consumed by Cargo earlier.
 /// A loader witness must verify those bytes before returning an actionable assessment.
-fn configuration_witness(snap: &GlobalStateSnapshot, purpose: WitnessUse) -> anyhow::Result<()> {
+pub(super) fn configuration_witness(
+    snap: &GlobalStateSnapshot,
+    purpose: WitnessUse,
+) -> anyhow::Result<()> {
     let Some(witness) = snap.configuration_witness.as_ref() else {
         if matches!(purpose, WitnessUse::Assessment) {
             snap.request_configuration_reload_if_needed();

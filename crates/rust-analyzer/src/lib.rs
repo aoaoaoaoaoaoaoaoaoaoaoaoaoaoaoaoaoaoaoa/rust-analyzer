@@ -52,6 +52,7 @@ mod handlers {
     pub(crate) mod imports;
     pub(crate) mod notification;
     pub(crate) mod request;
+    pub(crate) mod signature_search;
 }
 
 pub mod tracing {

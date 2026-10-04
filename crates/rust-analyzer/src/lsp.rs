@@ -7,6 +7,7 @@ use ide::{CompletionItem, CompletionItemImport, CompletionItemRefMode, Completio
 use tenthash::TentHash;
 
 pub mod ext;
+pub(crate) mod signature;
 
 pub(crate) mod capabilities;
 pub(crate) mod from_proto;

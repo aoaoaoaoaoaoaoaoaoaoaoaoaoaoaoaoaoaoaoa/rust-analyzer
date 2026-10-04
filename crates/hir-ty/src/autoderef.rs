@@ -39,8 +39,17 @@ pub fn autoderef<'db>(
     env: ParamEnvAndCrate<'db>,
     ty: Canonical<'db, Ty<'db>>,
 ) -> impl Iterator<Item = Ty<'db>> + use<'db> {
+    autoderef_in_mode(db, env, ty, TypingMode::PostAnalysis)
+}
+
+pub fn autoderef_in_mode<'db>(
+    db: &'db dyn HirDatabase,
+    env: ParamEnvAndCrate<'db>,
+    ty: Canonical<'db, Ty<'db>>,
+    mode: TypingMode<'db>,
+) -> impl Iterator<Item = Ty<'db>> + use<'db> {
     let interner = DbInterner::new_with(db, env.krate);
-    let infcx = interner.infer_ctxt().build(TypingMode::PostAnalysis);
+    let infcx = interner.infer_ctxt().build(mode);
     let (ty, _) = infcx.instantiate_canonical(Span::Dummy, &ty);
     let autoderef = Autoderef::new(&infcx, env.param_env, ty, Span::Dummy);
     let mut v = Vec::new();

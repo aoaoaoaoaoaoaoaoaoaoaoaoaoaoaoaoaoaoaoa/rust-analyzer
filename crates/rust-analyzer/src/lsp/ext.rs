@@ -26,6 +26,15 @@ pub enum InternalTestingFetchConfigRequest {}
 
 pub enum AssessImportRequest {}
 
+pub enum SemSignatureSearchRequest {}
+
+impl Request for SemSignatureSearchRequest {
+    type Params = super::signature::SignatureQuery;
+    type Result = super::signature::SignatureBatch;
+    const METHOD: LspRequestMethod<'_> = LspRequestMethod::new("rust-analyzer/semSignatureSearch");
+    const MESSAGE_DIRECTION: MessageDirection = MessageDirection::ClientToServer;
+}
+
 impl Request for AssessImportRequest {
     type Params = AssessImportParams;
     type Result = AssessImportResult;

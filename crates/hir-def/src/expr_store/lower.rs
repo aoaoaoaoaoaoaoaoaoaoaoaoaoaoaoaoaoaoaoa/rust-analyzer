@@ -241,7 +241,7 @@ fn validate_required_body(
     }
 }
 
-pub(crate) fn lower_type_ref(
+pub fn lower_type_ref(
     db: &dyn SourceDatabase,
     module: ModuleId,
     type_ref: InFile<Option<ast::Type>>,

@@ -27,12 +27,17 @@ mod from_id;
 mod has_source;
 mod import_scope;
 mod semantics;
+mod signature_query;
 mod source_analyzer;
 
 pub mod db;
 pub mod diagnostics;
 pub mod symbols;
 pub mod term_search;
+
+pub use signature_query::{
+    ReferencePolicy, SignaturePattern, TypeMatch, TypeMatchEvidence, TypeMatchUnknown, TypeShape,
+};
 
 mod display;
 

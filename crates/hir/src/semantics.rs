@@ -54,11 +54,11 @@ use syntax::{
 };
 
 use crate::{
-    Adjust, Adjustment, Adt, AnyFunctionId, AutoBorrow, BindingMode, BuiltinAttr, Callable, Const,
-    ConstParam, Crate, DeriveHelper, Enum, EnumVariant, ExpressionStoreOwner, Field, Function,
-    GenericSubstitution, HasSource, Impl, InFile, InlineAsmOperand, ItemInNs, Label, LifetimeParam,
-    Local, Macro, Module, ModuleDef, Name, OverloadedDeref, ScopeDef, Static, Struct, ToolModule,
-    Trait, TupleField, Type, TypeAlias, TypeParam, Union, Variant,
+    Adjust, Adjustment, Adt, AnyFunctionId, AssocItem, AutoBorrow, BindingMode, BuiltinAttr,
+    Callable, Const, ConstParam, Crate, DeriveHelper, Enum, EnumVariant, ExpressionStoreOwner,
+    Field, Function, GenericSubstitution, HasSource, Impl, InFile, InlineAsmOperand, ItemInNs,
+    Label, LifetimeParam, Local, Macro, Module, ModuleDef, Name, OverloadedDeref, ScopeDef, Static,
+    Struct, ToolModule, Trait, TupleField, Type, TypeAlias, TypeParam, Union, Variant,
     db::HirDatabase,
     semantics::source_to_def::{ChildContainer, SourceToDefCache, SourceToDefCtx},
     source_analyzer::{SourceAnalyzer, resolve_hir_path},
@@ -2160,6 +2160,223 @@ impl<'db> SemanticsImpl<'db> {
                 infer_body,
             },
         )
+    }
+
+    pub fn signature_scope_at(
+        &self,
+        module: Module,
+        node: &SyntaxNode,
+        offset: Option<TextSize>,
+    ) -> SemanticsScope<'db> {
+        let file = self.find_file(node);
+        let Some(offset) = offset else {
+            return SemanticsScope {
+                db: self.db,
+                infer_body: None,
+                file_id: file.file_id,
+                resolver: module.id.resolver(self.db),
+            };
+        };
+        if let Some(real_file) = file.file_id.file_id() {
+            let modules: Vec<_> = self.file_to_module_defs(real_file.file_id(self.db)).collect();
+            if modules.as_slice() == [module]
+                && let Some(selected) =
+                    node.token_at_offset(offset).right_biased().and_then(|t| t.parent())
+                && let Some(scope) = self.scope_at_offset(&selected, offset)
+                && (scope.resolver.generic_def().is_some() || scope.infer_body.is_some())
+            {
+                return scope;
+            }
+        }
+        let mut modules = vec![module];
+        let mut seen_modules = FxHashSet::default();
+        let mut selected = None;
+        let mut selected_len = TextSize::from(u32::MAX);
+        let mut candidates = Vec::new();
+        while let Some(module) = modules.pop() {
+            if !seen_modules.insert(module) {
+                continue;
+            }
+            for child in module.children(self.db) {
+                let source = child.definition_source_range(self.db);
+                if source.file_id == file.file_id && source.value.contains_inclusive(offset) {
+                    modules.push(child);
+                }
+            }
+            for declaration in module.declarations(self.db) {
+                if let Some(generic) = declaration.as_generic_def() {
+                    candidates.push(generic);
+                }
+                if let ModuleDef::Trait(trait_) = declaration {
+                    candidates.extend(trait_.items(self.db).into_iter().map(|item| match item {
+                        AssocItem::Function(f) => crate::GenericDef::Function(f),
+                        AssocItem::Const(c) => crate::GenericDef::Const(c),
+                        AssocItem::TypeAlias(a) => crate::GenericDef::TypeAlias(a),
+                    }));
+                }
+            }
+            for impl_ in Impl::all_in_module(self.db, module) {
+                candidates.push(crate::GenericDef::Impl(impl_));
+                candidates.extend(impl_.items(self.db).into_iter().map(|item| match item {
+                    AssocItem::Function(f) => crate::GenericDef::Function(f),
+                    AssocItem::Const(c) => crate::GenericDef::Const(c),
+                    AssocItem::TypeAlias(a) => crate::GenericDef::TypeAlias(a),
+                }));
+            }
+            if selected_len == TextSize::from(u32::MAX) {
+                selected =
+                    Some(SourceAnalyzer::new_for_resolver(module.id.resolver(self.db), file));
+            }
+            for generic in candidates.drain(..) {
+                let Ok(def) = GenericDefId::try_from(generic) else {
+                    continue;
+                };
+                let source = match generic {
+                    crate::GenericDef::Function(f) => {
+                        self.source(f).map(|s| s.map(|n| n.syntax().text_range()))
+                    }
+                    crate::GenericDef::Const(c) => {
+                        self.source(c).map(|s| s.map(|n| n.syntax().text_range()))
+                    }
+                    crate::GenericDef::Static(s) => {
+                        self.source(s).map(|s| s.map(|n| n.syntax().text_range()))
+                    }
+                    crate::GenericDef::Trait(t) => {
+                        self.source(t).map(|s| s.map(|n| n.syntax().text_range()))
+                    }
+                    crate::GenericDef::TypeAlias(a) => {
+                        self.source(a).map(|s| s.map(|n| n.syntax().text_range()))
+                    }
+                    crate::GenericDef::Adt(crate::Adt::Struct(s)) => {
+                        self.source(s).map(|s| s.map(|n| n.syntax().text_range()))
+                    }
+                    crate::GenericDef::Adt(crate::Adt::Enum(e)) => {
+                        self.source(e).map(|s| s.map(|n| n.syntax().text_range()))
+                    }
+                    crate::GenericDef::Adt(crate::Adt::Union(u)) => {
+                        self.source(u).map(|s| s.map(|n| n.syntax().text_range()))
+                    }
+                    crate::GenericDef::Impl(i) => {
+                        self.source(i).map(|s| s.map(|n| n.syntax().text_range()))
+                    }
+                };
+                if let Some(source) = source
+                    && source.file_id == file.file_id
+                    && source.value.contains_inclusive(offset)
+                    && source.value.len() < selected_len
+                {
+                    let body = match generic {
+                        crate::GenericDef::Function(f) => Some(crate::DefWithBody::Function(f)),
+                        crate::GenericDef::Const(c) => Some(crate::DefWithBody::Const(c)),
+                        crate::GenericDef::Static(s) => Some(crate::DefWithBody::Static(s)),
+                        _ => None,
+                    };
+                    if let Some(body) = body {
+                        modules.extend(body.signature_block_modules(self.db).into_iter().filter(
+                            |module| {
+                                let source = module.definition_source_range(self.db);
+                                source.file_id == file.file_id
+                                    && source.value.contains_inclusive(offset)
+                            },
+                        ));
+                    }
+                    selected_len = source.value.len();
+                    selected = Some(match def {
+                        GenericDefId::FunctionId(f) => SourceAnalyzer::new_for_body_no_infer(
+                            self.db,
+                            f.into(),
+                            file,
+                            Some(offset),
+                        ),
+                        _ => SourceAnalyzer::new_generic_def_no_infer(
+                            self.db,
+                            self,
+                            def,
+                            file,
+                            Some(offset),
+                        ),
+                    });
+                }
+            }
+        }
+        let SourceAnalyzer { file_id, resolver, infer_body, .. } = selected
+            .unwrap_or_else(|| SourceAnalyzer::new_for_resolver(module.id.resolver(self.db), file));
+        SemanticsScope { db: self.db, file_id, resolver, infer_body }
+    }
+
+    pub fn signature_anchor_type(
+        &self,
+        module: Module,
+        node: &SyntaxNode,
+        range: TextRange,
+    ) -> Option<Type<'db>> {
+        let scope = self.signature_scope_at(module, node, Some(range.start()));
+        let source = self.find_file(node);
+        let owner = scope.resolver.expression_store_owner();
+        let analyzer = match owner {
+            Some(ExpressionStoreOwnerId::Body(def)) => {
+                SourceAnalyzer::new_for_body(self.db, def, source, Some(range.start()))
+            }
+            Some(owner) => SourceAnalyzer::new_generic_def(
+                self.db,
+                self,
+                owner.generic_def(self.db),
+                source,
+                Some(range.start()),
+            ),
+            None => SourceAnalyzer::new_for_resolver(scope.resolver, source),
+        };
+        let selected = if range.is_empty() {
+            node.token_at_offset(range.start()).right_biased()?.parent()?
+        } else {
+            node.descendants().filter(|n| n.text_range() == range).last()?
+        };
+        for selected in selected.ancestors() {
+            if !range.is_empty() && selected.text_range() != range {
+                break;
+            }
+            if let Some(ty) = ast::Type::cast(selected.clone()) {
+                if self
+                    .file_to_module_defs(source.file_id.original_file(self.db).file_id(self.db))
+                    .count()
+                    == 1
+                {
+                    return self.resolve_type(&ty);
+                }
+                return analyzer.type_of_type(self.db, &ty).or_else(|| {
+                    let def = analyzer.resolver.generic_def()?;
+                    SourceAnalyzer::new_generic_def(self.db, self, def, source, Some(range.start()))
+                        .type_of_type(self.db, &ty)
+                });
+            }
+            if let Some(expr) = ast::Expr::cast(selected.clone()) {
+                return analyzer.type_of_expr(self.db, &expr).map(|info| info.0);
+            }
+            if let Some(pat) = ast::IdentPat::cast(selected.clone()) {
+                return analyzer.type_of_binding_in_pat(self.db, &pat);
+            }
+            if let Some(pat) = ast::Pat::cast(selected.clone()) {
+                return analyzer.type_of_pat(self.db, &pat).map(|info| info.0);
+            }
+            if ast::Fn::can_cast(selected.kind())
+                || ast::Struct::can_cast(selected.kind())
+                || ast::Enum::can_cast(selected.kind())
+                || ast::Union::can_cast(selected.kind())
+                || ast::Const::can_cast(selected.kind())
+                || ast::Static::can_cast(selected.kind())
+                || ast::TypeAlias::can_cast(selected.kind())
+            {
+                return match analyzer.resolver.generic_def()? {
+                    GenericDefId::FunctionId(f) => Some(Function::from(f).ty(self.db)),
+                    GenericDefId::AdtId(a) => Some(Adt::from(a).ty(self.db)),
+                    GenericDefId::ConstId(c) => Some(Const::from(c).ty(self.db)),
+                    GenericDefId::StaticId(s) => Some(Static::from(s).ty(self.db)),
+                    GenericDefId::TypeAliasId(a) => Some(TypeAlias::from(a).ty(self.db)),
+                    _ => None,
+                };
+            }
+        }
+        None
     }
 
     /// Search for a definition's source and cache its syntax tree

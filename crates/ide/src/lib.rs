@@ -47,6 +47,7 @@ mod references;
 mod rename;
 mod runnables;
 mod signature_help;
+mod signature_search;
 mod ssr;
 mod static_index;
 mod status;
@@ -116,6 +117,16 @@ pub use crate::{
     rename::{RenameConfig, RenameError},
     runnables::{Runnable, RunnableKind, TestId, UpdateTest},
     signature_help::SignatureHelp,
+    signature_search::{
+        CallableKind as SignatureCallableKind, CandidateSource as SignatureCandidateSource,
+        ContextChoice as SignatureContextChoice, DependencyPolicy as SignatureDependencyPolicy,
+        EvidenceRole as SignatureEvidenceRole, InputPredicate as SignatureInputPredicate,
+        InputSlot as SignatureInputSlot, MatchEvidence as SignatureMatchEvidence,
+        Parameter as SignatureParameter, PatternInput as SignaturePatternInput,
+        SearchScope as SignatureSearchScope, SignatureAnchor, SignatureBatch, SignatureCandidate,
+        SignatureCoverage, SignatureError, SignatureQuery,
+        TypeDescription as SignatureTypeDescription,
+    },
     static_index::{
         StaticIndex, StaticIndexedFile, TokenId, TokenStaticData, VendoredLibrariesConfig,
     },
@@ -454,6 +465,13 @@ impl Analysis {
         position: FilePosition,
     ) -> Cancellable<PredicateEvaluationResult> {
         self.with_db(|db| predicate_eval::evaluate_predicate(db, text, position))
+    }
+
+    pub fn sem_signature_search(
+        &self,
+        query: SignatureQuery,
+    ) -> Cancellable<Result<SignatureBatch, SignatureError>> {
+        self.with_db(|db| signature_search::search(db, query))
     }
 
     pub fn view_mir(&self, position: FilePosition) -> Cancellable<String> {

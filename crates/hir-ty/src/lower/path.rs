@@ -487,11 +487,13 @@ impl<'a, 'b, 'db> PathLoweringContext<'a, 'b, 'db> {
     ) -> Ty<'db> {
         let interner = self.ctx.interner;
         let db = self.ctx.db;
-        let def = self.ctx.generic_def;
         let segment = self.current_or_prev_segment;
         let assoc_name = segment.name;
         let (assoc_type, trait_args) = match res {
             Some(TypeNs::GenericParam(param)) => {
+                let Some((_, def)) = self.ctx.owner.item() else {
+                    return self.ctx.types.types.error;
+                };
                 let AssocTypeShorthandResolution::Resolved(assoc_type) =
                     super::resolve_type_param_assoc_type_shorthand(
                         db,

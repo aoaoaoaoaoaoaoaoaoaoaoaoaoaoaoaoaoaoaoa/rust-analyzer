@@ -1973,7 +1973,7 @@ impl<'db> InferenceContext<'db> {
         never!(expected_ty.has_infer(), "cannot have infer vars in an anon const's ty");
         let konst = create_anon_const(
             self.interner(),
-            self.store_owner,
+            Some(self.store_owner),
             self.store,
             expr,
             &self.resolver,

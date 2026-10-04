@@ -126,6 +126,13 @@ impl ConfigurationWitness {
             .map(|((path, _), _)| path.as_path())
     }
 
+    pub(crate) fn file_revisions(&self) -> impl Iterator<Item = (&AbsPath, &[u8; 32])> {
+        self.entries.iter().filter_map(|((path, kind), state)| match (kind, state) {
+            (InputKind::File, FileState::File { digest, .. }) => Some((path.as_path(), digest)),
+            _ => None,
+        })
+    }
+
     pub(crate) fn hash_identity(&self, state: &mut impl Hasher) {
         self.generation.hash(state);
         self.entries.hash(state);

@@ -353,7 +353,7 @@ pub(crate) fn path_to_const<'a, 'db>(
 
 pub(crate) fn create_anon_const<'a, 'db>(
     interner: DbInterner<'db>,
-    owner: ExpressionStoreOwnerId,
+    owner: Option<ExpressionStoreOwnerId>,
     store: &ExpressionStore,
     expr_id: ExprId,
     resolver: &Resolver<'db>,
@@ -393,6 +393,7 @@ pub(crate) fn create_anon_const<'a, 'db>(
             konst
         }
         _ => {
+            let owner = owner.ok_or(CreateConstError::AnonConstInterningDisabled)?;
             let Some(token) = lowering_mode.allow_tracked_structs() else {
                 return Err(CreateConstError::AnonConstInterningDisabled);
             };

@@ -176,6 +176,9 @@ impl<'db> SingleGenerics<'db> {
 }
 
 impl<'db> Generics<'db> {
+    pub(crate) fn in_module() -> Self {
+        Self { chain: ArrayVec::new() }
+    }
     pub(crate) fn iter_owners(&self) -> impl DoubleEndedIterator<Item = &SingleGenerics<'db>> {
         self.chain.iter()
     }

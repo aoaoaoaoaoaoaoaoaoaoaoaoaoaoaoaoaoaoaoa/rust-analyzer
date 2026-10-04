@@ -206,15 +206,29 @@ pub trait TyLoweringInferVarsCtx<'db> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LoweringOwner {
+    Item { expression_store: ExpressionStoreOwnerId, generic: GenericDefId },
+    Module,
+}
+
+impl LoweringOwner {
+    fn item(self) -> Option<(ExpressionStoreOwnerId, GenericDefId)> {
+        match self {
+            Self::Item { expression_store, generic } => Some((expression_store, generic)),
+            Self::Module => None,
+        }
+    }
+}
+
 pub struct TyLoweringContext<'db, 'a> {
     pub db: &'db dyn HirDatabase,
     pub(crate) interner: DbInterner<'db>,
     types: &'db crate::next_solver::DefaultAny<'db>,
     lang_items: &'db LangItems,
     resolver: &'a Resolver<'db>,
-    store: &'db ExpressionStore,
-    def: ExpressionStoreOwnerId,
-    generic_def: GenericDefId,
+    store: &'a ExpressionStore,
+    owner: LoweringOwner,
     generics: &'a OnceCell<Generics<'db>>,
     in_binders: DebruijnIndex,
     impl_trait_mode: ImplTraitLoweringState,
@@ -236,9 +250,50 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
     pub fn new(
         db: &'db dyn HirDatabase,
         resolver: &'a Resolver<'db>,
-        store: &'db ExpressionStore,
+        store: &'a ExpressionStore,
         def: ExpressionStoreOwnerId,
         generic_def: GenericDefId,
+        generics: &'a OnceCell<Generics<'db>>,
+        lifetime_elision: LifetimeElisionKind<'db>,
+        lifetime_lowering_mode: LifetimeLoweringMode,
+    ) -> Self {
+        Self::new_context(
+            db,
+            resolver,
+            store,
+            LoweringOwner::Item { expression_store: def, generic: generic_def },
+            generics,
+            lifetime_elision,
+            lifetime_lowering_mode,
+        )
+    }
+
+    /// Reuses ordinary lowering with a real module resolver and no item parameters.
+    /// Owner-dependent forms cannot acquire an invented item owner in this context.
+    /// This only changes invocation plumbing, not Rust's lowering rules:
+    /// <https://github.com/rust-lang/rust/blob/1.89.0/compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs>.
+    pub fn new_in_module(
+        db: &'db dyn HirDatabase,
+        resolver: &'a Resolver<'db>,
+        store: &'a ExpressionStore,
+        generics: &'a OnceCell<Generics<'db>>,
+    ) -> Self {
+        Self::new_context(
+            db,
+            resolver,
+            store,
+            LoweringOwner::Module,
+            generics,
+            LifetimeElisionKind::Infer,
+            LifetimeLoweringMode::Bound,
+        )
+    }
+
+    fn new_context(
+        db: &'db dyn HirDatabase,
+        resolver: &'a Resolver<'db>,
+        store: &'a ExpressionStore,
+        owner: LoweringOwner,
         generics: &'a OnceCell<Generics<'db>>,
         lifetime_elision: LifetimeElisionKind<'db>,
         lifetime_lowering_mode: LifetimeLoweringMode,
@@ -246,8 +301,12 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
         let impl_trait_mode = ImplTraitLoweringState::new(ImplTraitLoweringMode::Disallowed);
         let in_binders = DebruijnIndex::ZERO;
         let interner = DbInterner::new_with(db, resolver.krate());
-        let bound_vars =
-            vec![(Vec::new(), TyLoweringContext::bound_vars(db, interner, generic_def, generics))];
+        let bound_vars = vec![(
+            Vec::new(),
+            owner.item().map_or_else(BoundVarKinds::empty, |(_, def)| {
+                TyLoweringContext::bound_vars(db, interner, def, generics)
+            }),
+        )];
         Self {
             db,
             // Can provide no block since we don't use it for trait solving.
@@ -255,8 +314,7 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
             types: crate::next_solver::default_types(),
             lang_items: interner.lang_items(),
             resolver,
-            def,
-            generic_def,
+            owner,
             generics,
             store,
             in_binders,
@@ -281,12 +339,18 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
 
     pub(crate) fn set_owner(&mut self, owner: &'a SingleGenerics<'db>) {
         self.store = owner.store();
-        self.def = ExpressionStoreOwnerId::Signature(owner.def());
+        if let LoweringOwner::Item { expression_store, .. } = &mut self.owner {
+            *expression_store = ExpressionStoreOwnerId::Signature(owner.def());
+        }
     }
 
-    pub(crate) fn with_interning_mode(mut self, interning_mode: LoweringMode) -> Self {
+    pub fn with_interning_mode(mut self, interning_mode: LoweringMode) -> Self {
         self.interning_mode = interning_mode;
         self
+    }
+
+    pub fn has_diagnostics(&self) -> bool {
+        !self.diagnostics.is_empty()
     }
 
     pub(crate) fn with_debruijn<T>(
@@ -377,7 +441,11 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
         let bound_vars = BoundVarKinds::new_from_iter(
             self.interner,
             binder.iter().map(|_| {
-                BoundVariableKind::Region(BoundRegionKind::Named(self.generic_def.into()))
+                BoundVariableKind::Region(
+                    self.owner.item().map_or(BoundRegionKind::Anon, |(_, def)| {
+                        BoundRegionKind::Named(def.into())
+                    }),
+                )
             }),
         );
         self.bound_vars.push((binder.to_vec(), bound_vars));
@@ -459,6 +527,9 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
         expr_id: ExprId,
         const_type: Ty<'db>,
     ) -> Const<'db> {
+        let owner = self.owner.item();
+        let generics_cache = self.generics;
+        let db = self.db;
         #[expect(clippy::manual_map, reason = "a `map()` here generates a borrowck error")]
         let create_var = match &mut self.infer_vars {
             Some(infer_vars) => Some(
@@ -468,12 +539,16 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
         };
         let konst = create_anon_const(
             self.interner,
-            self.def,
+            self.owner.item().map(|(def, _)| def),
             self.store,
             expr_id,
             self.resolver,
             const_type,
-            &|| self.generics.get_or_init(|| generics(self.db, self.generic_def)),
+            &|| {
+                generics_cache.get_or_init(|| {
+                    owner.map_or_else(Generics::in_module, |(_, def)| generics(db, def))
+                })
+            },
             create_var,
             self.interning_mode,
             self.forbid_params_after,
@@ -501,7 +576,9 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
     }
 
     fn generics(&self) -> &Generics<'db> {
-        self.generics.get_or_init(|| generics(self.db, self.generic_def))
+        self.generics.get_or_init(|| {
+            self.owner.item().map_or_else(Generics::in_module, |(_, def)| generics(self.db, def))
+        })
     }
 
     fn param_index_is_disallowed(&self, index: u32) -> bool {
@@ -623,6 +700,9 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
             TypeRef::ImplTrait(bounds) => {
                 match self.impl_trait_mode.mode {
                     ImplTraitLoweringMode::Opaque => {
+                        let Some((_, generic_def)) = self.owner.item() else {
+                            return (self.types.types.error, None);
+                        };
                         let origin = match self.resolver.generic_def() {
                             Some(GenericDefId::FunctionId(it)) => Either::Left(it),
                             Some(GenericDefId::TypeAliasId(it)) => Either::Right(it),
@@ -685,7 +765,7 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
                                         ),
                                         LifetimeLoweringMode::LateParam => Region::new_late_param(
                                             interner,
-                                            self.generic_def.into(),
+                                            generic_def.into(),
                                             BoundRegion {
                                                 var: BoundVar::from_u32(late_bound_index),
                                                 kind: bound_region_kind,
@@ -1006,6 +1086,18 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
             .into_iter()
             .map(|pred| (pred, GenericPredicateSource::SelfOnly))
             .chain(assoc_bounds.into_iter().flatten())
+    }
+
+    pub fn lower_query_bounds(
+        &mut self,
+        bounds: &[TypeBound],
+        self_ty: Ty<'db>,
+    ) -> Vec<Clause<'db>> {
+        let mut clauses = Vec::new();
+        for bound in bounds {
+            clauses.extend(self.lower_type_bound(bound, self_ty, false).map(|(clause, _)| clause));
+        }
+        clauses
     }
 
     fn lower_dyn_trait(&mut self, bounds: &[TypeBound]) -> Ty<'db> {
@@ -1357,6 +1449,7 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
     }
 
     fn find_and_lower_hrtb_lifetime(&mut self, lifetime: LifetimeRefId) -> Option<Region<'db>> {
+        let (_, generic_def) = self.owner.item()?;
         if let LifetimeRef::Named(lt_name) = &self.store[lifetime] {
             self.bound_vars.iter().rev().enumerate().find_map(|(debruijn, (binder, _))| {
                 binder.iter().enumerate().find_map(|(index, l)| {
@@ -1364,7 +1457,7 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
                         self.hrtb_region_param(
                             index as u32,
                             DebruijnIndex::from_usize(debruijn),
-                            self.generic_def,
+                            generic_def,
                         )
                     })
                 })
