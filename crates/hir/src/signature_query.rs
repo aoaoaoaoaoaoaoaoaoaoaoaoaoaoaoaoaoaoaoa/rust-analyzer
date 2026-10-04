@@ -20,7 +20,7 @@ use hir_ty::{
 };
 use rustc_hash::FxHashSet;
 use rustc_type_ir::{
-    AliasTyKind, PredicatePolarity, TypeFoldable, TypeVisitableExt,
+    AliasTyKind, PredicatePolarity, TypeFlags, TypeFoldable, TypeVisitableExt,
     inherent::{IntoKind, Term as _, Ty as _},
 };
 use syntax::ast::HasModuleItem;
@@ -345,6 +345,9 @@ fn normalize_identity<'db>(
     ty: &Type<'db>,
     holes: &FxHashSet<Ty<'db>>,
 ) -> Type<'db> {
+    if !ty.ty.skip_binder().has_type_flags(TypeFlags::HAS_TY_PROJECTION) {
+        return ty.clone();
+    }
     let env = ty.param_env(db);
     let interner = DbInterner::new_with(db, env.krate);
     let infcx = interner.infer_ctxt().build(signature_typing_mode());

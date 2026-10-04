@@ -185,6 +185,7 @@ pub enum CandidateSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignatureCandidate {
     pub id: String,
+    pub name: String,
     pub qualified_name: String,
     pub signature: String,
     #[serde(rename = "crate")]

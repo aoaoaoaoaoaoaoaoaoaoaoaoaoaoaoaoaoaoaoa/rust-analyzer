@@ -311,6 +311,7 @@ pub(crate) fn handle_sem_signature_search(
                 .collect();
             Ok::<_, anyhow::Error>(wire::SignatureCandidate {
                 id: candidate.id,
+                name: candidate.name,
                 qualified_name: candidate.qualified_name,
                 signature: candidate.signature,
                 crate_name: candidate.crate_name,

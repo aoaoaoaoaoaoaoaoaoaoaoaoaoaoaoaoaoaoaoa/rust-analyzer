@@ -104,6 +104,7 @@ pub enum CandidateSource {
 #[derive(Debug, Clone)]
 pub struct SignatureCandidate {
     pub id: String,
+    pub name: String,
     pub qualified_name: String,
     pub signature: String,
     pub crate_name: String,
@@ -160,6 +161,36 @@ enum Declaration {
     Function(Function),
     Struct(hir::Struct),
     Variant(hir::EnumVariant),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EnumerationBand {
+    Workspace,
+    DirectDependency,
+    Dependency,
+    Builtin,
+}
+
+#[derive(Default)]
+struct EnumerationQueue {
+    modules: Vec<Module>,
+    bodies: Vec<DefWithBody>,
+}
+
+fn enumeration_limit(
+    mut batch: SignatureBatch,
+    queues: &BTreeMap<EnumerationBand, EnumerationQueue>,
+    reason: &str,
+) -> SignatureBatch {
+    batch.coverage.complete = false;
+    batch.coverage.unsearched.push(reason.into());
+    if queues.values().any(|queue| !queue.bodies.is_empty()) {
+        batch
+            .coverage
+            .unsearched
+            .push("body-local declaration traversal unfinished at enumeration budget".into());
+    }
+    finish(batch)
 }
 
 fn context<'db>(
@@ -261,6 +292,10 @@ pub(crate) fn search(
         .transpose()?;
     let workspace: FxHashSet<_> =
         Crate::all(db).into_iter().filter(|krate| krate.origin(db).is_local()).collect();
+    let direct_dependencies: FxHashSet<_> = workspace
+        .iter()
+        .flat_map(|krate| krate.dependencies(db).into_iter().map(|dependency| dependency.krate))
+        .collect();
     let mut crates = workspace.clone();
     if query.dependencies != DependencyPolicy::Exclude {
         let mut pending: Vec<_> = workspace.iter().copied().collect();
@@ -275,16 +310,50 @@ pub(crate) fn search(
     if query.dependencies == DependencyPolicy::Only {
         crates.retain(|krate| !workspace.contains(krate));
     }
-    let mut pending: Vec<_> = crates.iter().flat_map(|krate| krate.modules(db)).collect();
-    pending.sort_by_key(|module| format!("{module:?}"));
-    pending.reverse();
+    let mut queues: BTreeMap<EnumerationBand, EnumerationQueue> = BTreeMap::new();
+    for krate in crates {
+        let band = if workspace.contains(&krate) {
+            EnumerationBand::Workspace
+        } else if krate.is_builtin(db) {
+            EnumerationBand::Builtin
+        } else if direct_dependencies.contains(&krate) {
+            EnumerationBand::DirectDependency
+        } else {
+            EnumerationBand::Dependency
+        };
+        queues.entry(band).or_default().modules.extend(krate.modules(db));
+    }
+    for queue in queues.values_mut() {
+        queue.modules.sort_by_key(|module| format!("{module:?}"));
+        queue.modules.reverse();
+    }
     let mut seen_modules = FxHashSet::default();
     let mut seen_declarations = FxHashSet::default();
     let mut batch = SignatureBatch {
         candidates: Vec::new(),
         coverage: SignatureCoverage { complete: true, ..Default::default() },
     };
-    while let Some(module) = pending.pop() {
+    while let Some((&band, _)) = queues.first_key_value() {
+        let queue = queues.get_mut(&band).unwrap();
+        let module = if let Some(module) = queue.modules.pop() {
+            module
+        } else if !queue.bodies.is_empty() {
+            if batch.coverage.examined >= query.max_candidates {
+                return Ok(enumeration_limit(
+                    batch,
+                    &queues,
+                    "semantic candidate enumeration budget exhausted",
+                ));
+            }
+            let body = queue.bodies.pop().unwrap();
+            queue.modules = body.signature_block_modules(db);
+            queue.modules.sort_by_key(|module| format!("{module:?}"));
+            queue.modules.reverse();
+            continue;
+        } else {
+            queues.pop_first();
+            continue;
+        };
         if !seen_modules.insert(module) {
             continue;
         }
@@ -300,9 +369,7 @@ pub(crate) fn search(
             }
         }
         if seen_modules.len() > 100_000 {
-            batch.coverage.complete = false;
-            batch.coverage.unsearched.push("module traversal budget exhausted".into());
-            break;
+            return Ok(enumeration_limit(batch, &queues, "module traversal budget exhausted"));
         }
         if module.import_scope_status(db).is_err() {
             batch.coverage.complete = false;
@@ -367,29 +434,28 @@ pub(crate) fn search(
                 add_assoc(item, &mut declarations, &mut bodies);
             }
         }
-        let mut blocks: Vec<_> =
-            bodies.into_iter().flat_map(|body| body.signature_block_modules(db)).collect();
-        blocks.sort_by_key(|module| format!("{module:?}"));
-        blocks.reverse();
-        pending.extend(blocks);
+        bodies.sort_by_key(|body| format!("{body:?}"));
+        bodies.reverse();
+        queues.get_mut(&band).unwrap().bodies.extend(bodies);
         declarations.sort_by_key(|declaration| format!("{declaration:?}"));
         for declaration in declarations {
             if !seen_declarations.insert(declaration) {
                 continue;
             }
             if batch.coverage.examined >= query.max_candidates {
-                batch.coverage.complete = false;
-                batch
-                    .coverage
-                    .unsearched
-                    .push("semantic candidate enumeration budget exhausted".into());
-                return Ok(finish(batch));
+                return Ok(enumeration_limit(
+                    batch,
+                    &queues,
+                    "semantic candidate enumeration budget exhausted",
+                ));
             }
-            let (name, signature, source, callable, kind) = declaration_data(&sema, declaration);
+            let scoped_source = matches!(query.scope, SearchScope::Regions(_))
+                .then(|| declaration_source(&sema, declaration));
             if let SearchScope::Regions(regions) = &query.scope {
-                let location = match &source {
-                    CandidateSource::Physical { range, .. } => Some(*range),
-                    CandidateSource::Nonphysical { origin, .. } => *origin,
+                let location = match &scoped_source {
+                    Some(CandidateSource::Physical { range, .. }) => Some(*range),
+                    Some(CandidateSource::Nonphysical { origin, .. }) => *origin,
+                    None => None,
                 };
                 if location.is_none() {
                     batch.coverage.complete = false;
@@ -406,6 +472,12 @@ pub(crate) fn search(
                 }
             }
             batch.coverage.examined += 1;
+            let ty = match declaration {
+                Declaration::Function(f) => f.ty(db),
+                Declaration::Struct(s) => s.constructor_ty(db),
+                Declaration::Variant(v) => v.constructor_ty(db),
+            };
+            let callable = ty.as_callable(db);
             let Some(callable) = callable else {
                 unknown(&mut batch.coverage, TypeMatchUnknown::UnsupportedStructure);
                 continue;
@@ -462,6 +534,8 @@ pub(crate) fn search(
             let InputsMatch::Yes(assignments) = input_matches else {
                 continue;
             };
+            let (name, signature, kind) = declaration_data(&sema, declaration);
+            let source = scoped_source.unwrap_or_else(|| declaration_source(&sema, declaration));
             let mut matches = Vec::new();
             for (pattern, index, evidence) in assignments {
                 matches.push(render_evidence(
@@ -496,6 +570,13 @@ pub(crate) fn search(
             }
             batch.candidates.push(SignatureCandidate {
                 id: format!("{krate:?}:{declaration:?}"),
+                name: match declaration {
+                    Declaration::Function(f) => f.name(db),
+                    Declaration::Struct(s) => s.name(db),
+                    Declaration::Variant(v) => v.name(db),
+                }
+                .as_str()
+                .to_owned(),
                 qualified_name: qualified(db, module, &name),
                 signature,
                 crate_name: krate
@@ -656,9 +737,9 @@ fn written_type(
 fn declaration_data<'db>(
     sema: &Semantics<'db, RootDatabase>,
     declaration: Declaration,
-) -> (String, String, CandidateSource, Option<hir::Callable<'db>>, CallableKind) {
+) -> (String, String, CallableKind) {
     let db = sema.db;
-    let (name, signature, source, ty, kind) = match declaration {
+    match declaration {
         Declaration::Function(f) => {
             let target = f.module(db).krate(db).to_display_target(db);
             let kind = if let Some(assoc) = f.as_assoc_item(db) {
@@ -692,21 +773,13 @@ fn declaration_data<'db>(
                     }
                 }
             }
-            (
-                name,
-                signature,
-                sema.source(f).map(|source| source.map(|node| node.syntax().clone())),
-                f.ty(db),
-                kind,
-            )
+            (name, signature, kind)
         }
         Declaration::Struct(s) => {
             let target = s.module(db).krate(db).to_display_target(db);
             (
                 s.name(db).as_str().to_owned(),
                 s.display(db, target).to_string(),
-                sema.source(s).map(|source| source.map(|node| node.syntax().clone())),
-                s.constructor_ty(db),
                 CallableKind::TupleStructConstructor,
             )
         }
@@ -730,13 +803,23 @@ fn declaration_data<'db>(
             (
                 format!("{}::{}", v.parent_enum(db).name(db).as_str(), v.name(db).as_str()),
                 format!("{header}{}", v.display(db, target)),
-                sema.source(v).map(|source| source.map(|node| node.syntax().clone())),
-                v.constructor_ty(db),
                 CallableKind::EnumVariantConstructor,
             )
         }
+    }
+}
+
+fn declaration_source(
+    sema: &Semantics<'_, RootDatabase>,
+    declaration: Declaration,
+) -> CandidateSource {
+    let db = sema.db;
+    let source = match declaration {
+        Declaration::Function(f) => sema.source(f).map(|s| s.map(|n| n.syntax().clone())),
+        Declaration::Struct(s) => sema.source(s).map(|s| s.map(|n| n.syntax().clone())),
+        Declaration::Variant(v) => sema.source(v).map(|s| s.map(|n| n.syntax().clone())),
     };
-    let source = match source {
+    match source {
         Some(source) => match source.file_id.file_id() {
             Some(file) => {
                 let name_offset = source
@@ -766,8 +849,7 @@ fn declaration_data<'db>(
             origin: None,
             reason: "provider declaration has no physical syntax".into(),
         },
-    };
-    (name, signature, source, ty.as_callable(db), kind)
+    }
 }
 
 enum InputsMatch {
@@ -967,6 +1049,12 @@ pub fn dependency()->Foo {Foo}
             );
         }
         assert_eq!(batch.candidates.iter().filter(|c| c.qualified_name == "plain").count(), 1);
+        let generated = batch.candidates.iter().find(|c| c.name == "generated").unwrap();
+        assert_eq!(generated.kind, CallableKind::Function);
+        assert!(matches!(generated.source, CandidateSource::Nonphysical { .. }));
+        let method = batch.candidates.iter().find(|c| c.name == "method").unwrap();
+        assert_eq!(method.kind, CallableKind::Method);
+        assert_ne!(method.name, method.qualified_name);
         let mut exact = base.clone();
         exact.references = ReferencePolicy::Exact;
         assert!(!run(exact).candidates.iter().any(|c| c.qualified_name == "borrowed"));
@@ -1055,6 +1143,7 @@ pub fn dependency()->Foo {Foo}
         assert!(run(awaited).candidates.iter().any(|c| c.qualified_name == "later"));
         let mut dependencies = base.clone();
         dependencies.dependencies = DependencyPolicy::Only;
+        dependencies.max_candidates = 1;
         let dependencies = run(dependencies);
         let dependency =
             dependencies.candidates.iter().find(|c| c.qualified_name == "dependency").unwrap();
@@ -1084,6 +1173,7 @@ pub fn dependency()->Foo {Foo}
         let limited = run(limited);
         assert!(!limited.coverage.complete);
         assert!(!limited.coverage.unsearched.is_empty());
+        assert!(limited.coverage.unsearched.iter().any(|reason| reason.contains("body-local")));
 
         let (generic_analysis, first) = fixture::position("$0fn first<T>(x:T)->T {x}");
         let mut contextual = base.clone();
