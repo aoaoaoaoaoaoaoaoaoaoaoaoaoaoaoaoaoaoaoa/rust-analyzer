@@ -10,7 +10,7 @@
 //! `resolve_glob_import`: private import visibility bounds propagation.
 //! <https://github.com/rust-lang/rust/blob/18ed059b1465ce6195154de3250a668f1dd3b1fa/compiler/rustc_resolve/src/imports.rs>
 
-use hir::{ImportBindingAssessment, ItemInNs, Module, PathResolution, Semantics};
+use hir::{FileRange, ImportBindingAssessment, ItemInNs, Module, PathResolution, Semantics};
 use ide_db::{
     FileId, FxHashSet, RootDatabase,
     defs::{Definition, IdentClass, NameClass, NameRefClass},
@@ -79,12 +79,22 @@ pub(crate) fn assess_import(
         Ok(()) => ImportAssessment::Insert,
         Err(Refusal::Conflict(reason)) => ImportAssessment::Conflict(reason.into()),
         Err(Refusal::Unknown(reason)) => ImportAssessment::Unknown(reason.into()),
+        Err(Refusal::UnknownAttribute { path, source, expansion }) => {
+            let path = path.as_deref().unwrap_or("<missing>");
+            let expansion =
+                expansion.map_or(String::new(), |range| format!(", expansion bytes {range:?}"));
+            ImportAssessment::Unknown(format!(
+                "dependent attribute {path:?} has no complete expansion or inert-attribute evidence (source bytes {:?}{expansion})",
+                source.range
+            ))
+        }
     }
 }
 
 enum Refusal {
     Conflict(&'static str),
     Unknown(&'static str),
+    UnknownAttribute { path: Option<String>, source: FileRange, expansion: Option<TextRange> },
 }
 
 struct Impact<'a, 'db> {
@@ -254,20 +264,43 @@ impl Impact<'_, '_> {
                         }
                     }
                     if !has_expansion && !has_derive {
-                        let known_inert = attr.simple_name().as_deref() != Some("cfg_attr")
-                            && meta.path().is_some_and(|path| {
-                                matches!(
-                                    self.sema.resolve_path(&path),
-                                    Some(
-                                        PathResolution::BuiltinAttr(_)
-                                            | PathResolution::DeriveHelper(_)
-                                    )
-                                )
-                            });
+                        // CfgMeta intentionally has no Path AST. Configuration
+                        // is already owned by the active analyzer model.
+                        let known_inert = matches!(&meta, ast::Meta::CfgMeta(_))
+                            || (attr.simple_name().as_deref() != Some("cfg_attr")
+                                && meta.path().is_some_and(|path| {
+                                    match self.sema.resolve_path(&path) {
+                                        Some(
+                                            PathResolution::BuiltinAttr(_)
+                                            | PathResolution::DeriveHelper(_),
+                                        ) => true,
+                                        // Active builtin test attributes are deliberately
+                                        // recollected without storing an expansion.
+                                        Some(PathResolution::Def(hir::ModuleDef::Macro(
+                                            macro_,
+                                        ))) => {
+                                            macro_.kind(self.sema.db) == hir::MacroKind::AttrBuiltIn
+                                        }
+                                        _ => false,
+                                    }
+                                }));
                         if !known_inert {
-                            return Err(Refusal::Unknown(
-                                "dependent attribute has no complete expansion or inert-attribute evidence",
-                            ));
+                            return Err(Refusal::UnknownAttribute {
+                                path: meta
+                                    .path()
+                                    .map(|path| {
+                                        let text = path.syntax().text().to_string();
+                                        let mut chars = text.chars();
+                                        let mut path: String = chars.by_ref().take(128).collect();
+                                        if chars.next().is_some() {
+                                            path.push('…');
+                                        }
+                                        path
+                                    })
+                                    .or_else(|| meta.simple_name().map(Into::into)),
+                                source: self.sema.original_range(attr.syntax()),
+                                expansion: expansion.then_some(attr.syntax().text_range()),
+                            });
                         }
                     }
                 }
@@ -444,6 +477,25 @@ mod tests {
 
     #[test]
     fn expansion_inputs_and_outputs_remain_in_the_impact_boundary() {
+        let (analysis, range) = fixture::range(
+            r#"
+//- /lib.rs cfg:test
+#[rustc_builtin_macro] pub macro test($item:item) {}
+#[rustc_builtin_macro] pub macro bench($item:item) {}
+#[rustc_builtin_macro] pub macro test_case($item:item) {}
+mod api { pub struct Token; }
+mod client $0{
+    use crate::{test as check_sample, bench as measure_sample, test_case as case_sample};
+    #[check_sample] fn first() {}
+    #[measure_sample] fn second() {}
+    #[case_sample] fn third() {}
+}$0
+"#,
+        );
+        assert_eq!(
+            analysis.assess_import(range.file_id, range.range, "crate::api::Token", None).unwrap(),
+            ImportAssessment::Insert
+        );
         // Builtin derives may have no syntax tree; proc derives still supply
         // their output, and active derive helpers are inert attributes.
         assert_eq!(
@@ -456,6 +508,8 @@ mod api { pub struct Token; }
 struct Data {}
 #[derive(Default)]
 enum Mode { #[default] Idle }
+#[cfg(all())]
+mod active {}
 "#,
                 "crate::api::Token"
             ),
@@ -491,9 +545,11 @@ mod client $0{
         // Unresolved attributes on block items can escape the crate DefMap's
         // diagnostics. Their absent expansion must not be treated as empty.
         let result = assess(
-            "mod api { pub struct Token; } mod empty {} use empty::*; fn f() { #[missing] fn nested() {} }",
+            "mod api { pub struct Token; } mod empty {} use empty::*; fn f() { #[missing(details_are_not_diagnostic)] fn nested() {} }",
             "crate::api::Token",
         );
-        assert!(matches!(result, ImportAssessment::Unknown(_)));
+        assert!(matches!(result, ImportAssessment::Unknown(reason)
+            if reason.contains("missing") && reason.contains("source")
+                && !reason.contains("details_are_not_diagnostic")));
     }
 }
