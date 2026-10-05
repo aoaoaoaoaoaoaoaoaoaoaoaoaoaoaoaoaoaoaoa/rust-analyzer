@@ -118,6 +118,20 @@ Invoking code action at this position will yield two code actions for importing 
 * Is a fixed two-level structure enough?
 * Should we devise a general way to encode custom interaction protocols for GUI refactorings?
 
+## Module File Membership (maintained fork)
+
+`rust-analyzer/isModuleFile` accepts `{textDocument: {uri}}` and returns
+`{moduleFile: boolean, sha256: string}`. The boolean reports membership in the
+provider's active module map, including item-level `include!` expansions. The hash
+identifies the same provider source snapshot with normalized line endings.
+Missing VFS source, pending analysis inputs or an unavailable configuration witness
+produce an error, not negative membership.
+
+This does not classify arbitrary expression fragments or certify every compiler
+configuration. Include recovery must retain fragments reachable from a known host,
+even when the fragment is not itself a module file. Callers must treat unsupported
+providers, failed requests and mismatched source hashes as unknown, not unlinked.
+
 ## Parent Module
 
 **Upstream Issue:** <https://github.com/microsoft/language-server-protocol/issues/1002>

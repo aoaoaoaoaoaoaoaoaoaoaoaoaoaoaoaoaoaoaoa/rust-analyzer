@@ -167,4 +167,44 @@ mod baz;
         );
         assert_eq!(analysis.crates_for(file_id).unwrap().len(), 2);
     }
+
+    #[test]
+    fn module_membership_includes_expansions_but_not_unloaded_sources() {
+        let (analysis, _) = fixture::file(
+            r#"
+//- minicore:include
+//- /lib.rs crate:main
+mod child;
+#[cfg(any())] mod inactive;
+include!("included.rs");
+//- /child.rs
+pub fn child() {}
+//- /inactive.rs
+pub fn inactive() {}
+//- /included.rs
+include!("nested.rs");
+//- /nested.rs
+pub fn nested() {}
+//- /scratch.rs
+include!("orphan.rs");
+//- /orphan.rs
+pub fn orphan() {}
+"#,
+        );
+        for (file, path) in analysis.input_files(100).unwrap().unwrap() {
+            let path = path.to_string();
+            if path == "/lib.rs"
+                || path.ends_with("/child.rs")
+                || path.ends_with("/included.rs")
+                || path.ends_with("/nested.rs")
+            {
+                assert!(analysis.is_module_file(file).unwrap(), "{path}");
+            } else if path.ends_with("/inactive.rs")
+                || path.ends_with("/scratch.rs")
+                || path.ends_with("/orphan.rs")
+            {
+                assert!(!analysis.is_module_file(file).unwrap(), "{path}");
+            }
+        }
+    }
 }

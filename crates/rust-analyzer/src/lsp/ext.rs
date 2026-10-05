@@ -243,6 +243,28 @@ impl Request for InterpretFunctionRequest {
 
 pub enum ViewFileTextRequest {}
 
+pub enum IsModuleFileRequest {}
+
+impl Request for IsModuleFileRequest {
+    type Params = IsModuleFileParams;
+    type Result = IsModuleFileResult;
+    const METHOD: LspRequestMethod<'_> = LspRequestMethod::new("rust-analyzer/isModuleFile");
+    const MESSAGE_DIRECTION: MessageDirection = MessageDirection::ClientToServer;
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IsModuleFileParams {
+    pub text_document: TextDocumentIdentifier,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsModuleFileResult {
+    pub module_file: bool,
+    pub sha256: String,
+}
+
 impl Request for ViewFileTextRequest {
     type Params = lsp_types::TextDocumentIdentifier;
     type Result = String;

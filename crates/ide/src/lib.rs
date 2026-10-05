@@ -512,6 +512,12 @@ impl Analysis {
         self.with_db(fetch_crates::fetch_crates)
     }
 
+    /// Whether the file belongs to an active module, including item-level include expansions.
+    /// This is not a predicate for arbitrary expression fragments or inactive configurations.
+    pub fn is_module_file(&self, file_id: FileId) -> Cancellable<bool> {
+        self.with_db(|db| Semantics::new(db).file_to_module_defs(file_id).next().is_some())
+    }
+
     pub fn expand_macro(&self, position: FilePosition) -> Cancellable<Option<ExpandedMacro>> {
         self.with_db(|db| expand_macro::expand_macro(db, position))
     }

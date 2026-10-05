@@ -928,6 +928,22 @@ pub(crate) fn handle_goto_type_definition(
     Ok(Some(res))
 }
 
+pub(crate) fn handle_is_module_file(
+    snap: GlobalStateSnapshot,
+    params: lsp_ext::IsModuleFileParams,
+) -> anyhow::Result<lsp_ext::IsModuleFileResult> {
+    use super::imports::{WitnessUse, configuration_witness, ready, text_digest};
+    ready(&snap)?;
+    configuration_witness(&snap, WitnessUse::Assessment)?;
+    let file_id = snap
+        .url_to_file_id(&params.text_document.uri)?
+        .ok_or_else(|| anyhow::anyhow!("source is absent from provider VFS"))?;
+    Ok(lsp_ext::IsModuleFileResult {
+        module_file: snap.analysis.is_module_file(file_id)?,
+        sha256: text_digest(&snap.analysis.file_text(file_id)?),
+    })
+}
+
 pub(crate) fn handle_parent_module(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,
