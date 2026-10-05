@@ -410,7 +410,6 @@ pub(crate) fn search(
                                 sema.original_range(source.value.syntax()).into_file_id(db),
                             )
                         }) {
-                            batch.coverage.complete = false;
                             *batch.coverage.exclusions.entry("unit/record struct constructors (non-callable construction syntax)".into()).or_default()+=1;
                         }
                     }
@@ -427,7 +426,6 @@ pub(crate) fn search(
                                     sema.original_range(source.value.syntax()).into_file_id(db),
                                 )
                             }) {
-                                batch.coverage.complete = false;
                                 *batch.coverage.exclusions.entry("unit/record enum constructors (non-callable construction syntax)".into()).or_default()+=1;
                             }
                         }
@@ -1216,6 +1214,32 @@ pub fn dependency()->Foo {Foo}
         assert!(!limited.coverage.complete);
         assert!(!limited.coverage.unsearched.is_empty());
         assert!(limited.coverage.unsearched.iter().any(|reason| reason.contains("body-local")));
+
+        let (clean_analysis, clean) = fixture::position(
+            r#"
+$0struct Unit;
+struct Record {value:u8}
+enum Shape {Unit,Record {value:u8},Tuple(u8)}
+fn make()->Shape {loop {}}
+"#,
+        );
+        let mut callable_universe = base.clone();
+        callable_universe.context =
+            SignatureAnchor { file_id: clean.file_id, range: None, context_id: None };
+        callable_universe.output = Some(PatternInput::Type("Shape".into()));
+        let clean = clean_analysis.sem_signature_search(callable_universe).unwrap().unwrap();
+        // Known non-callable construction syntax is counted, not a gap in callable discovery.
+        assert!(clean.coverage.complete);
+        assert_eq!(clean.coverage.exclusions.values().sum::<u32>(), 4);
+        assert_eq!(clean.candidates.len(), 2);
+        assert!(clean.candidates.iter().any(|candidate| candidate.name == "make"));
+        assert!(
+            clean
+                .candidates
+                .iter()
+                .any(|candidate| candidate.kind == CallableKind::EnumVariantConstructor
+                    && candidate.name == "Tuple")
+        );
 
         let (generic_analysis, first) = fixture::position("$0fn first<T>(x:T)->T {x}");
         let mut contextual = base.clone();
