@@ -489,6 +489,62 @@ mod tests {
     use crate::{SearchScope, fixture, references::FindAllRefsConfig};
 
     #[test]
+    fn include_recovery_scope_requires_a_physical_local_owner() {
+        // A same-spelled scratch binding cannot reference a local in this
+        // function. That proof does not extend to items or generated owners.
+        for (source, needed) in [
+            ("fn f(unit$0: u32) -> u32 { unit }", false),
+            ("fn f$0(unit: u32) -> u32 { unit }", true),
+            ("fn f(unit$0: u32) -> u32 { unknown!(); unit }", true),
+            ("#[inline] fn f(unit$0: u32) -> u32 { unit }", true),
+            ("fn f(unit: u32) { let _ = \"unit$0\"; }", true),
+            (
+                r#"
+macro_rules! make { ($p:ident) => {
+    fn a($p: u32) -> u32 { $p }
+    fn b($p: u32) -> u32 { $p }
+} }
+make!(unit$0);
+"#,
+                true,
+            ),
+            (
+                r#"
+//- minicore:include
+//- /lib.rs
+fn f(unit$0: u32) -> u32 { include!("expr.rs") }
+//- /expr.rs
+unit
+"#,
+                true,
+            ),
+            (
+                r#"
+//- minicore:include
+//- /lib.rs
+fn f(unit$0: u32) -> u32 { let read = || include!("expr.rs"); read() }
+//- /expr.rs
+unit
+"#,
+                true,
+            ),
+            (
+                r#"
+//- minicore:include
+//- /lib.rs
+include!("items.rs");
+//- /items.rs
+fn f(unit$0: u32) -> u32 { unit }
+"#,
+                true,
+            ),
+        ] {
+            let (analysis, position) = fixture::position(source);
+            assert_eq!(analysis.needs_include_recovery(position).unwrap(), needed, "{source}");
+        }
+    }
+
+    #[test]
     fn exclude_tests() {
         check_with_filters(
             r#"

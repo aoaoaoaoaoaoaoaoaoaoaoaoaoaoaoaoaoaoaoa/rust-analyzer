@@ -928,19 +928,18 @@ pub(crate) fn handle_goto_type_definition(
     Ok(Some(res))
 }
 
-pub(crate) fn handle_is_module_file(
+pub(crate) fn handle_needs_include_recovery(
     snap: GlobalStateSnapshot,
-    params: lsp_ext::IsModuleFileParams,
-) -> anyhow::Result<lsp_ext::IsModuleFileResult> {
+    params: lsp_types::TextDocumentPositionParams,
+) -> anyhow::Result<lsp_ext::NeedsIncludeRecoveryResult> {
     use super::imports::{WitnessUse, configuration_witness, ready, text_digest};
     ready(&snap)?;
     configuration_witness(&snap, WitnessUse::Assessment)?;
-    let file_id = snap
-        .url_to_file_id(&params.text_document.uri)?
+    let position = from_proto::file_position(&snap, &params)?
         .ok_or_else(|| anyhow::anyhow!("source is absent from provider VFS"))?;
-    Ok(lsp_ext::IsModuleFileResult {
-        module_file: snap.analysis.is_module_file(file_id)?,
-        sha256: text_digest(&snap.analysis.file_text(file_id)?),
+    Ok(lsp_ext::NeedsIncludeRecoveryResult {
+        needed: snap.analysis.needs_include_recovery(position)?,
+        sha256: text_digest(&snap.analysis.file_text(position.file_id)?),
     })
 }
 

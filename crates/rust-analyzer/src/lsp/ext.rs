@@ -243,25 +243,20 @@ impl Request for InterpretFunctionRequest {
 
 pub enum ViewFileTextRequest {}
 
-pub enum IsModuleFileRequest {}
+pub enum NeedsIncludeRecoveryRequest {}
 
-impl Request for IsModuleFileRequest {
-    type Params = IsModuleFileParams;
-    type Result = IsModuleFileResult;
-    const METHOD: LspRequestMethod<'_> = LspRequestMethod::new("rust-analyzer/isModuleFile");
+impl Request for NeedsIncludeRecoveryRequest {
+    type Params = lsp_types::TextDocumentPositionParams;
+    type Result = NeedsIncludeRecoveryResult;
+    const METHOD: LspRequestMethod<'_> =
+        LspRequestMethod::new("rust-analyzer/needsIncludeRecovery");
     const MESSAGE_DIRECTION: MessageDirection = MessageDirection::ClientToServer;
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct IsModuleFileParams {
-    pub text_document: TextDocumentIdentifier,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct IsModuleFileResult {
-    pub module_file: bool,
+pub struct NeedsIncludeRecoveryResult {
+    pub needed: bool,
     pub sha256: String,
 }
 

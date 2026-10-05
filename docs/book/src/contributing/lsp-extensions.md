@@ -118,19 +118,22 @@ Invoking code action at this position will yield two code actions for importing 
 * Is a fixed two-level structure enough?
 * Should we devise a general way to encode custom interaction protocols for GUI refactorings?
 
-## Module File Membership (maintained fork)
+## Include Reference Recovery (maintained fork)
 
-`rust-analyzer/isModuleFile` accepts `{textDocument: {uri}}` and returns
-`{moduleFile: boolean, sha256: string}`. The boolean reports membership in the
-provider's active module map, including item-level `include!` expansions. The hash
-identifies the same provider source snapshot with normalized line endings.
+`rust-analyzer/needsIncludeRecovery` accepts `TextDocumentPositionParams` and
+returns `{needed: boolean, sha256: string}`. Recovery is unnecessary only for a
+uniquely resolved local binding whose containing function is physically declared
+in the queried file and has no macro calls, attributes or syntax error nodes,
+with no faults in its containing or crate module map.
+This sufficient condition avoids scanning unrelated include trees for ordinary
+locals. All other cases retain conservative recovery; no file is classified as
+unlinked. In particular, non-local symbols and block-module callers are unchanged.
+
+The hash identifies the queried source snapshot with normalized line endings.
 Missing VFS source, pending analysis inputs or an unavailable configuration witness
-produce an error, not negative membership.
-
-This does not classify arbitrary expression fragments or certify every compiler
-configuration. Include recovery must retain fragments reachable from a known host,
-even when the fragment is not itself a module file. Callers must treat unsupported
-providers, failed requests and mismatched source hashes as unknown, not unlinked.
+produce an error. Callers must retain conservative recovery for unsupported
+providers, failed requests and mismatched hashes. This does not certify inactive
+compiler configurations or completeness of ordinary reference analysis.
 
 ## Parent Module
 

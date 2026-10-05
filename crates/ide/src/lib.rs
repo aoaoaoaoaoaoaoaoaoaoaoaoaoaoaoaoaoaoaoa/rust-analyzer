@@ -512,10 +512,20 @@ impl Analysis {
         self.with_db(fetch_crates::fetch_crates)
     }
 
-    /// Whether the file belongs to an active module, including item-level include expansions.
-    /// This is not a predicate for arbitrary expression fragments or inactive configurations.
-    pub fn is_module_file(&self, file_id: FileId) -> Cancellable<bool> {
-        self.with_db(|db| Semantics::new(db).file_to_module_defs(file_id).next().is_some())
+    /// False only for a uniquely resolved local in a physical, include-free
+    /// function. This does not classify unlinked files or non-local symbols.
+    pub fn needs_include_recovery(&self, position: FilePosition) -> Cancellable<bool> {
+        self.with_db(|db| {
+            let sema = Semantics::new(db);
+            let syntax = sema.parse_guess_edition(position.file_id).syntax().clone();
+            let Some(definitions) = references::find_defs(&sema, &syntax, position.offset) else {
+                return true;
+            };
+            let [ide_db::defs::Definition::Local(local)] = definitions.as_slice() else {
+                return true;
+            };
+            !local.has_include_free_owner(db, position.file_id)
+        })
     }
 
     pub fn expand_macro(&self, position: FilePosition) -> Cancellable<Option<ExpandedMacro>> {

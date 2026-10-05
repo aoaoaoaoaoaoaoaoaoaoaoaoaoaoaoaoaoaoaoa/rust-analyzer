@@ -3257,6 +3257,39 @@ impl<'db> LocalSource<'db> {
 }
 
 impl<'db> Local<'db> {
+    /// A physically declared function without macro or attribute syntax cannot
+    /// acquire include-file references to one of its local bindings. This is a
+    /// sufficient condition only; generated and uncertain owners remain open.
+    pub fn has_include_free_owner(self, db: &dyn HirDatabase, file: FileId) -> bool {
+        let ExpressionStoreOwnerId::Body(DefWithBodyId::FunctionId(function)) = self.parent else {
+            return false;
+        };
+        let source = function.lookup(db).source(db);
+        if source.file_id.file_id().map(|id| id.file_id(db)) != Some(file) {
+            return false;
+        }
+        let module = self.module(db).id;
+        if module
+            .def_map(db)
+            .diagnostics()
+            .iter()
+            .chain(hir_def::nameres::crate_def_map(db, module.krate(db)).diagnostics())
+            .any(|diagnostic| {
+                !matches!(
+                    diagnostic.kind,
+                    hir_def::nameres::diagnostics::DefDiagnosticKind::UnconfiguredCode { .. }
+                )
+            })
+        {
+            return false;
+        }
+        !source.value.syntax().descendants().any(|node| {
+            matches!(node.kind(), syntax::SyntaxKind::ERROR)
+                || ast::MacroCall::can_cast(node.kind())
+                || ast::Attr::can_cast(node.kind())
+        })
+    }
+
     pub fn is_param(self, db: &dyn HirDatabase) -> bool {
         // FIXME: This parses!
         let src = self.primary_source(db);
