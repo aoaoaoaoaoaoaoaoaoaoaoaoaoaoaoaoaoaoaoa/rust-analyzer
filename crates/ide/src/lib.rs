@@ -48,6 +48,7 @@ mod rename;
 mod runnables;
 mod signature_help;
 mod signature_search;
+mod similar_types;
 mod ssr;
 mod static_index;
 mod status;
@@ -126,6 +127,11 @@ pub use crate::{
         SearchScope as SignatureSearchScope, SignatureAnchor, SignatureBatch, SignatureCandidate,
         SignatureCoverage, SignatureError, SignatureQuery,
         TypeDescription as SignatureTypeDescription,
+    },
+    similar_types::{
+        MemberResolution, SimilarBatch, SimilarCandidate, SimilarCoverage, SimilarDeclaration,
+        SimilarEvidence, SimilarInput, SimilarKind, SimilarMember, SimilarQuery, SimilarRelation,
+        SimilarShared,
     },
     static_index::{
         StaticIndex, StaticIndexedFile, TokenId, TokenStaticData, VendoredLibrariesConfig,
@@ -473,6 +479,13 @@ impl Analysis {
         query: SignatureQuery,
     ) -> Cancellable<Result<SignatureBatch, SignatureError>> {
         self.with_db(|db| signature_search::search(db, query))
+    }
+
+    pub fn sem_similar_types(
+        &self,
+        query: SimilarQuery,
+    ) -> Cancellable<Result<SimilarBatch, SignatureError>> {
+        self.with_db(|db| similar_types::search(db, query))
     }
 
     pub fn view_mir(&self, position: FilePosition) -> Cancellable<String> {

@@ -190,6 +190,7 @@ pub fn server_capabilities(config: &Config) -> ServerCapabilities {
             "ssr": true,
             "semeditImports": { "version": 1 },
             "semSignatureSearch": { "version": 1 },
+            "semSimilarTypes": { "version": 1 },
             "workspaceSymbolScopeKindFiltering": true,
         })),
         type_hierarchy_provider: None,

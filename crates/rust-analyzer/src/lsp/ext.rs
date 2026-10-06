@@ -28,6 +28,15 @@ pub enum AssessImportRequest {}
 
 pub enum SemSignatureSearchRequest {}
 
+pub enum SemSimilarTypesRequest {}
+
+impl Request for SemSimilarTypesRequest {
+    type Params = super::similar::SimilarQuery;
+    type Result = super::similar::SimilarBatch;
+    const METHOD: LspRequestMethod<'_> = LspRequestMethod::new("rust-analyzer/semSimilarTypes");
+    const MESSAGE_DIRECTION: MessageDirection = MessageDirection::ClientToServer;
+}
+
 impl Request for SemSignatureSearchRequest {
     type Params = super::signature::SignatureQuery;
     type Result = super::signature::SignatureBatch;

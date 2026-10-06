@@ -1,5 +1,5 @@
 <!---
-lsp/ext.rs hash: 99e704e0b058c690
+lsp/ext.rs hash: d6c33476721dfbbc
 
 If you need to change the above hash to make the test pass, please check if you
 need to adjust this doc as well and ping this issue:
@@ -18,6 +18,27 @@ Requests which we hope to upstream live under `experimental/` namespace.
 Requests, which are likely to always remain specific to `rust-analyzer` are under `rust-analyzer/` namespace.
 
 If you want to be notified about the changes to this document, subscribe to [#4604](https://github.com/rust-lang/rust-analyzer/issues/4604).
+
+## Declaration similarity (maintained fork)
+
+**Experimental Server Capability:** `{ "semSimilarTypes": { "version": 1 } }`
+
+**Request:** `rust-analyzer/semSimilarTypes`
+
+This fork extension ranks type declarations by member-multiset Jaccard similarity
+to a draft or existing declaration. It uses contextual HIR type identities;
+unresolved text matches carry separate evidence. Names only break ties. A score
+of 1 does not establish type equivalence or API substitutability.
+
+The request supplies a draft or source anchor, optional resolution context,
+physical or workspace scope, dependency policy, allowed declaration kinds,
+minimum score and candidate bound. The response carries ranked member comparisons,
+coverage, source revisions and an analysis stamp. Missing default contexts report
+crate-root URIs instead of guessing among crates. Source anchors, scope and stamp
+guards are shared with `rust-analyzer/semSignatureSearch`.
+
+The wire types in `crates/rust-analyzer/src/lsp/similar.rs` define the protocol.
+This extension is not advertised as an upstream rust-analyzer capability.
 
 ## Configuration in `initializationOptions`
 

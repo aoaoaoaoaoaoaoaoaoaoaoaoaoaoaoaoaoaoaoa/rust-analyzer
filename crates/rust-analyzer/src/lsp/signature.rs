@@ -1,3 +1,5 @@
+//! Version-one wire types for private callable signature discovery.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

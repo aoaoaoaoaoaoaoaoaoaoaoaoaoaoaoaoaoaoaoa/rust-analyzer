@@ -136,6 +136,7 @@ pub struct SignatureBatch {
 
 #[derive(Debug, Clone)]
 pub struct ContextChoice {
+    pub file_id: FileId,
     pub id: String,
     pub crate_name: String,
     pub module: String,
@@ -194,7 +195,7 @@ fn enumeration_limit(
     finish(batch)
 }
 
-fn context<'db>(
+pub(crate) fn context<'db>(
     sema: &Semantics<'db, RootDatabase>,
     anchor: &SignatureAnchor,
 ) -> Result<Module, SignatureError> {
@@ -209,17 +210,7 @@ fn context<'db>(
         [module] => Ok(*module),
         [] => Err("anchor file is not part of the active module graph".into()),
         _ => Err(SignatureError::AmbiguousContext {
-            choices: modules
-                .iter()
-                .map(|module| ContextChoice {
-                    id: format!("{module:?}"),
-                    crate_name: module
-                        .krate(sema.db)
-                        .display_name(sema.db)
-                        .map_or_else(|| "unnamed crate".into(), |name| name.to_string()),
-                    module: qualified(sema.db, *module, "").trim_end_matches("::").to_owned(),
-                })
-                .collect(),
+            choices: modules.iter().map(|module| context_choice(sema.db, *module)).collect(),
         }),
     }
 }
@@ -297,20 +288,7 @@ pub(crate) fn search(
         .iter()
         .flat_map(|krate| krate.dependencies(db).into_iter().map(|dependency| dependency.krate))
         .collect();
-    let mut crates = workspace.clone();
-    if query.dependencies != DependencyPolicy::Exclude {
-        let mut pending: Vec<_> = workspace.iter().copied().collect();
-        while let Some(krate) = pending.pop() {
-            for dependency in krate.dependencies(db) {
-                if crates.insert(dependency.krate) {
-                    pending.push(dependency.krate);
-                }
-            }
-        }
-    }
-    if query.dependencies == DependencyPolicy::Only {
-        crates.retain(|krate| !workspace.contains(krate));
-    }
+    let crates = search_crates(db, query.dependencies);
     let mut queues: BTreeMap<EnumerationBand, EnumerationQueue> = BTreeMap::new();
     for krate in crates {
         let band = if workspace.contains(&krate) {
@@ -358,17 +336,6 @@ pub(crate) fn search(
         if !seen_modules.insert(module) {
             continue;
         }
-        if let SearchScope::Regions(regions) = &query.scope {
-            let source = module.definition_source_range(db);
-            let file = source.file_id.original_file(db).file_id(db);
-            if !regions.iter().any(|(requested, range)| {
-                *requested == file
-                    && (source.file_id.is_macro()
-                        || range.is_none_or(|range| range.intersect(source.value).is_some()))
-            }) {
-                continue;
-            }
-        }
         if seen_modules.len() > 100_000 {
             return Ok(enumeration_limit(batch, &queues, "module traversal budget exhausted"));
         }
@@ -386,18 +353,15 @@ pub(crate) fn search(
             }
         }
         let mut declarations = Vec::new();
-        let mut bodies = Vec::new();
+        let bodies = module_bodies(db, module);
         for definition in module.declarations(db) {
             match definition {
                 ModuleDef::Function(function) => {
                     declarations.push(Declaration::Function(function));
-                    bodies.push(DefWithBody::Function(function));
                 }
-                ModuleDef::Const(c) => bodies.push(DefWithBody::Const(c)),
-                ModuleDef::Static(s) => bodies.push(DefWithBody::Static(s)),
                 ModuleDef::Trait(trait_) => {
                     for item in trait_.items(db) {
-                        add_assoc(item, &mut declarations, &mut bodies);
+                        add_assoc(item, &mut declarations);
                     }
                 }
                 ModuleDef::Adt(Adt::Struct(strukt)) => {
@@ -416,7 +380,6 @@ pub(crate) fn search(
                 }
                 ModuleDef::Adt(Adt::Enum(enum_)) => {
                     for variant in enum_.variants(db) {
-                        bodies.push(DefWithBody::EnumVariant(variant));
                         if variant.kind(db) == StructKind::Tuple {
                             declarations.push(Declaration::Variant(variant));
                         } else {
@@ -436,11 +399,9 @@ pub(crate) fn search(
         }
         for impl_ in hir::Impl::all_in_module(db, module) {
             for item in impl_.items(db) {
-                add_assoc(item, &mut declarations, &mut bodies);
+                add_assoc(item, &mut declarations);
             }
         }
-        bodies.sort_by_key(|body| format!("{body:?}"));
-        bodies.reverse();
         queues.get_mut(&band).unwrap().bodies.extend(bodies);
         declarations.sort_by_key(|declaration| format!("{declaration:?}"));
         for declaration in declarations {
@@ -601,13 +562,11 @@ pub(crate) fn search(
     Ok(finish(batch))
 }
 
-fn add_assoc(item: AssocItem, declarations: &mut Vec<Declaration>, bodies: &mut Vec<DefWithBody>) {
+fn add_assoc(item: AssocItem, declarations: &mut Vec<Declaration>) {
     match item {
         AssocItem::Function(f) => {
             declarations.push(Declaration::Function(f));
-            bodies.push(DefWithBody::Function(f));
         }
-        AssocItem::Const(c) => bodies.push(DefWithBody::Const(c)),
         _ => {}
     }
 }
@@ -616,7 +575,7 @@ fn unknown(coverage: &mut SignatureCoverage, reason: TypeMatchUnknown) {
     coverage.complete = false;
     *coverage.unknown_reasons.entry(format!("{reason:?}")).or_default() += 1;
 }
-fn in_scope(scope: &SearchScope, location: FileRange) -> bool {
+pub(crate) fn in_scope(scope: &SearchScope, location: FileRange) -> bool {
     match scope {
         SearchScope::Workspace => true,
         SearchScope::Regions(regions) => regions.iter().any(|(file, range)| {
@@ -642,7 +601,7 @@ fn finish(mut batch: SignatureBatch) -> SignatureBatch {
     batch.candidates.sort_by(|a, b| a.qualified_name.cmp(&b.qualified_name).then(a.id.cmp(&b.id)));
     batch
 }
-fn qualified(db: &RootDatabase, module: Module, name: &str) -> String {
+pub(crate) fn qualified(db: &RootDatabase, module: Module, name: &str) -> String {
     let mut modules = Vec::new();
     let mut current = Some(module);
     while let Some(module) = current {
@@ -979,6 +938,73 @@ fn match_inputs(
             )
             .unwrap_or(TypeMatchUnknown::UnsupportedStructure),
     )
+}
+
+pub(crate) fn search_crates(db: &RootDatabase, policy: DependencyPolicy) -> FxHashSet<Crate> {
+    let workspace: FxHashSet<_> =
+        Crate::all(db).into_iter().filter(|krate| krate.is_workspace_member(db)).collect();
+    let mut crates = workspace.clone();
+    if policy != DependencyPolicy::Exclude {
+        let mut pending: Vec<_> = workspace.iter().copied().collect();
+        while let Some(krate) = pending.pop() {
+            for dependency in krate.dependencies(db) {
+                if crates.insert(dependency.krate) {
+                    pending.push(dependency.krate);
+                }
+            }
+        }
+    }
+    if policy == DependencyPolicy::Only {
+        crates.retain(|krate| !workspace.contains(krate));
+    }
+    crates
+}
+
+pub(crate) fn module_bodies(db: &RootDatabase, module: Module) -> Vec<DefWithBody> {
+    let mut bodies = Vec::new();
+    let mut assoc = |item: AssocItem| match item {
+        AssocItem::Function(it) => bodies.push(DefWithBody::Function(it)),
+        AssocItem::Const(it) => bodies.push(DefWithBody::Const(it)),
+        _ => {}
+    };
+    for definition in module.declarations(db) {
+        if let ModuleDef::Trait(it) = definition {
+            for item in it.items(db) {
+                assoc(item);
+            }
+        }
+    }
+    for impl_ in hir::Impl::all_in_module(db, module) {
+        for item in impl_.items(db) {
+            assoc(item);
+        }
+    }
+    for definition in module.declarations(db) {
+        match definition {
+            ModuleDef::Function(it) => bodies.push(DefWithBody::Function(it)),
+            ModuleDef::Const(it) => bodies.push(DefWithBody::Const(it)),
+            ModuleDef::Static(it) => bodies.push(DefWithBody::Static(it)),
+            ModuleDef::Adt(Adt::Enum(it)) => {
+                bodies.extend(it.variants(db).into_iter().map(DefWithBody::EnumVariant))
+            }
+            _ => {}
+        }
+    }
+    bodies.sort_by_key(|body| format!("{body:?}"));
+    bodies.reverse();
+    bodies
+}
+
+pub(crate) fn context_choice(db: &RootDatabase, module: Module) -> ContextChoice {
+    ContextChoice {
+        file_id: module.definition_source_range(db).file_id.original_file(db).file_id(db),
+        id: format!("{module:?}"),
+        crate_name: module
+            .krate(db)
+            .display_name(db)
+            .map_or_else(|| "unnamed crate".into(), |name| name.to_string()),
+        module: qualified(db, module, "").trim_end_matches("::").to_owned(),
+    }
 }
 
 #[cfg(test)]

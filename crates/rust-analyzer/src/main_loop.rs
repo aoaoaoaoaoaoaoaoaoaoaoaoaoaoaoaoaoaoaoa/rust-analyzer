@@ -1494,6 +1494,7 @@ impl GlobalState {
             .on::<NO_RETRY, lsp_ext::SsrRequest>(handlers::handle_ssr)
             .on_guarded::<NO_RETRY, lsp_ext::AssessImportRequest>(crate::handlers::imports::handle_assess_import)
             .on_guarded::<NO_RETRY, lsp_ext::SemSignatureSearchRequest>(crate::handlers::signature_search::handle_sem_signature_search)
+            .on_guarded::<NO_RETRY, lsp_ext::SemSimilarTypesRequest>(crate::handlers::similar_types::handle_sem_similar_types)
             .on_guarded::<NO_RETRY, lsp_ext::ImportStampRequest>(crate::handlers::imports::handle_import_stamp)
             .on::<NO_RETRY, lsp_ext::ViewRecursiveMemoryLayoutRequest>(handlers::handle_view_recursive_memory_layout)
             .on::<NO_RETRY, lsp_ext::ViewSyntaxTreeRequest>(handlers::handle_view_syntax_tree)
