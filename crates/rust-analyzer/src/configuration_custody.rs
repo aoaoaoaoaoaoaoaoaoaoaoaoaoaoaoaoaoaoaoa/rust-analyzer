@@ -67,6 +67,8 @@ pub(crate) struct ConfigurationCustody {
     passes: usize,
     pub(crate) model: Option<Arc<ConfigurationWitness>>,
     active: Option<Arc<ConfigurationWitness>>,
+    /// Why no witness is active; `None` before the first load concludes.
+    absence: Option<Arc<str>>,
 }
 
 pub(crate) struct ConfigurationPlan {
@@ -95,6 +97,8 @@ pub(crate) struct ConfigurationLoad {
     config: Arc<Config>,
     candidates: Candidates,
     pub(crate) witness: Option<Arc<ConfigurationWitness>>,
+    /// Why `witness` is `None`.
+    absence: Option<Arc<str>>,
     retry: bool,
 }
 
@@ -173,10 +177,22 @@ impl ConfigurationCustody {
     pub(crate) fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.active = None;
+        self.absence = Some(Arc::from("project configuration is loading; retry when it settles"));
     }
 
-    pub(crate) fn active(&self, config: &Arc<Config>) -> Option<Arc<ConfigurationWitness>> {
-        self.active.as_ref().filter(|witness| Arc::ptr_eq(&witness.config, config)).cloned()
+    /// The active witness, or why there is none.
+    pub(crate) fn active(
+        &self,
+        config: &Arc<Config>,
+    ) -> Result<Arc<ConfigurationWitness>, Arc<str>> {
+        match &self.active {
+            Some(witness) if Arc::ptr_eq(&witness.config, config) => Ok(witness.clone()),
+            Some(_) => Err(Arc::from("analyzer configuration changed since project loading")),
+            None => Err(self
+                .absence
+                .clone()
+                .unwrap_or_else(|| Arc::from("project configuration has not loaded yet"))),
+        }
     }
 
     pub(crate) fn needs_refresh(&self, config: &Arc<Config>) -> bool {
@@ -222,12 +238,18 @@ impl ConfigurationCustody {
     }
 
     pub(crate) fn dependent_plan(&mut self, config: &Arc<Config>) -> ConfigurationPlan {
+        let prior = self.absence.clone();
         self.invalidate();
         let cargo = config.cargo(None);
         let origin = self.model.clone();
         let candidates = (|| {
             supported(config, &cargo)?;
-            let origin = origin.as_ref().context("workspace configuration witness unavailable")?;
+            let origin = origin.as_ref().with_context(|| {
+                format!(
+                    "workspace stage has no configuration witness: {}",
+                    prior.as_deref().unwrap_or("project configuration has not loaded yet")
+                )
+            })?;
             ensure!(Arc::ptr_eq(&origin.config, config), "loader configuration changed");
             Ok(origin.candidates.clone())
         })()
@@ -248,6 +270,7 @@ impl ConfigurationCustody {
             return false;
         }
         self.candidates = load.candidates.clone();
+        self.absence = load.absence.clone();
         load.retry && self.passes < MAX_DISCOVERY_PASSES
     }
 
@@ -259,6 +282,9 @@ impl ConfigurationCustody {
 
     /// Called only when the corresponding graph/proc-macro change is applied.
     pub(crate) fn publish(&mut self, witness: Option<Arc<ConfigurationWitness>>) {
+        if witness.as_ref().is_some_and(|witness| witness.generation != self.generation) {
+            self.absence = Some(Arc::from("configuration was reloaded while applying the project"));
+        }
         self.active = witness.filter(|witness| witness.generation == self.generation);
         if self.active.is_some() {
             self.model = self.active.clone();
@@ -311,22 +337,35 @@ impl ConfigurationAttempt {
                             }
                         }
                     }
-                    _ => anyhow::bail!("unsupported or incomplete workspace configuration"),
+                    ProjectWorkspaceKind::Cargo { error: Some(error), .. } => {
+                        anyhow::bail!("cargo metadata reported an error: {error:#}")
+                    }
+                    _ => anyhow::bail!("non-Cargo workspaces have no finite loader witness"),
                 }
             }
             candidates.ambient(&self.cargo)?;
             let after = capture(self.generation, self.config.clone(), candidates)?;
-            let ready = !self.discovery_only
-                && after.entries.iter().all(|(key, state)| before.entries.get(key) == Some(state));
-            Ok((after, ready))
+            let absence = if self.discovery_only {
+                Some("configuration discovery has not settled; retry when loading finishes")
+            } else if after
+                .entries
+                .iter()
+                .any(|(key, state)| before.entries.get(key) != Some(state))
+            {
+                Some("configuration inputs changed during project loading")
+            } else {
+                None
+            };
+            Ok((after, absence))
         })();
         Box::new(match result {
-            Ok((after, ready)) => ConfigurationLoad {
+            Ok((after, absence)) => ConfigurationLoad {
                 generation: self.generation,
                 config: self.config.clone(),
                 candidates: after.candidates.clone(),
-                witness: ready.then(|| Arc::new(after)),
-                retry: !ready,
+                witness: absence.is_none().then(|| Arc::new(after)),
+                absence: absence.map(Arc::from),
+                retry: absence.is_some(),
             },
             Err(error) => {
                 tracing::debug!(%error, "configuration witness unavailable");
@@ -335,6 +374,7 @@ impl ConfigurationAttempt {
                     config: self.config,
                     candidates: Candidates::default(),
                     witness: None,
+                    absence: Some(Arc::from(format!("{error:#}").as_str())),
                     retry: self.retry_on_error,
                 }
             }
@@ -694,10 +734,13 @@ mod tests {
         let witness = Arc::new(capture(1, config.clone(), candidates).unwrap());
         let mut custody = ConfigurationCustody { generation: 1, ..Default::default() };
         custody.publish(Some(witness.clone()));
-        assert!(custody.active(&config).is_some());
+        assert!(custody.active(&config).is_ok());
         custody.invalidate();
         custody.publish(Some(witness.clone()));
-        assert!(custody.active(&config).is_none());
+        assert_eq!(
+            custody.active(&config).err().as_deref(),
+            Some("configuration was reloaded while applying the project")
+        );
 
         fs::write(root.join("Cargo.toml"), "[package]\nname = \"changed\"\nversion = \"0.1.0\"\n")
             .unwrap();

@@ -38,7 +38,7 @@ pub(super) fn stamp_digest(snap: &GlobalStateSnapshot, stamp: InputStamp) -> Str
     let mut hasher = StampHasher(Sha256::new());
     hasher.0.update(b"semedit-imports-input-stamp-v1");
     stamp.hash(&mut hasher);
-    if let Some(witness) = &snap.configuration_witness {
+    if let Ok(witness) = &snap.configuration_witness {
         hasher.0.update(b"configuration-witness");
         witness.hash_identity(&mut hasher);
     } else {
@@ -65,13 +65,14 @@ pub(super) fn configuration_witness(
     snap: &GlobalStateSnapshot,
     purpose: WitnessUse,
 ) -> anyhow::Result<()> {
-    let Some(witness) = snap.configuration_witness.as_ref() else {
-        if matches!(purpose, WitnessUse::Assessment) {
-            snap.request_configuration_reload_if_needed();
+    let witness = match &snap.configuration_witness {
+        Ok(witness) => witness,
+        Err(absence) => {
+            if matches!(purpose, WitnessUse::Assessment) {
+                snap.request_configuration_reload_if_needed();
+            }
+            anyhow::bail!("configuration loader witness unavailable: {absence}");
         }
-        anyhow::bail!(
-            "configuration loader witness unavailable: reload the workspace or use supported Cargo configuration"
-        );
     };
     let result = witness.validate();
     if result.is_err() && matches!(purpose, WitnessUse::Assessment) {

@@ -235,7 +235,7 @@ pub(crate) struct GlobalStateSnapshot {
     pub(crate) proc_macros_loaded: bool,
     pub(crate) import_inputs_ready: bool,
     pub(crate) configuration_witness:
-        Option<Arc<crate::configuration_custody::ConfigurationWitness>>,
+        Result<Arc<crate::configuration_custody::ConfigurationWitness>, Arc<str>>,
     configuration_reload: Sender<crate::main_loop::DeferredTask>,
     configuration_refresh_needed: bool,
     pub(crate) flycheck: Arc<[FlycheckHandle]>,
