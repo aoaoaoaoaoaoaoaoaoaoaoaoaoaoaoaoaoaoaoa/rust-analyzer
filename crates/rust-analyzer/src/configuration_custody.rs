@@ -510,7 +510,7 @@ fn capture(
             };
             ensure!(
                 !metadata.file_type().is_symlink(),
-                "symlinked configuration input is unsupported: {path}; use a regular file at this path and reload the workspace"
+                "symlinked configuration input is unsupported: {path}; use the corresponding regular file or directory at this path and reload the workspace"
             );
             let canonical = paths::Utf8PathBuf::from_path_buf(fs::canonicalize(&path)?)
                 .map_err(|_| anyhow::anyhow!("non-UTF8 canonical configuration path"))?;
