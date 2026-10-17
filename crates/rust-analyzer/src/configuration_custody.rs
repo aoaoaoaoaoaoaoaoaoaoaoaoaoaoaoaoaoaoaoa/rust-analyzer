@@ -510,7 +510,7 @@ fn capture(
             };
             ensure!(
                 !metadata.file_type().is_symlink(),
-                "symlinked configuration inputs are unsupported"
+                "symlinked configuration input is unsupported: {path}; use a regular file at this path and reload the workspace"
             );
             let canonical = paths::Utf8PathBuf::from_path_buf(fs::canonicalize(&path)?)
                 .map_err(|_| anyhow::anyhow!("non-UTF8 canonical configuration path"))?;
@@ -719,6 +719,20 @@ mod tests {
         assert!(witness.file_paths().any(|path| path == root.join("custom.json").as_path()));
         fs::write(root.join("custom.json"), "{\"changed\": true}").unwrap();
         assert!(witness.validate().is_err());
+
+        #[cfg(unix)]
+        {
+            // A refused witness must identify the input, not merely the input kind.
+            let path = root.join(".cargo/config.toml");
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink("../custom.json", &path).unwrap();
+            let error = capture(5, witness.config.clone(), witness.candidates.clone())
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains(path.as_str()), "{error}");
+            assert!(error.contains("regular file"), "{error}");
+        }
     }
 
     #[test]
